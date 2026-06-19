@@ -4,14 +4,15 @@ from backend.control_plane.app.models.migration import MigrationChunk
 import uuid
 
 class MigrationChunkRepository:
-    def create_chunk(self, db: Session, job_id: str, table_id: str, min_pk: str, max_pk: str) -> MigrationChunk:
+    def create_chunk(self, db: Session, job_id: str, table_id: str, table_name: str, pk_start: str, pk_end: str) -> MigrationChunk:
         chunk = MigrationChunk(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             job_id=job_id,
             table_id=table_id,
-            min_pk=min_pk,
-            max_pk=max_pk,
-            status="PENDING"
+            table_name=table_name,
+            pk_start=pk_start,
+            pk_end=pk_end,
+            status="pending"
         )
         db.add(chunk)
         db.commit()

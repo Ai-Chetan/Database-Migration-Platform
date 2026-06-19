@@ -4,14 +4,26 @@ from backend.shared.constants.statuses import MigrationJobStatus
 from backend.shared.exceptions.base import PlatformException
 from backend.shared.config.logging import logger
 
+
 class JobManager:
     def __init__(self):
         self.job_repo = MigrationJobRepository()
 
-    def create_job(self, db: Session, config: dict = None) -> str:
-        logger.info("Creating migration job")
-        job = self.job_repo.create_job(db, config)
-        return job.id
+    def create_job(
+        self,
+        db,
+        source_config,
+        target_config,
+        tenant_id="local"
+    ):
+
+        return self.job_repo.create_job(
+            db=db,
+            source_config=source_config,
+            target_config=target_config,
+            tenant_id=tenant_id
+        )
+
 
     def start_job(self, db: Session, job_id: str):
         logger.info("Starting migration job", job_id=job_id)

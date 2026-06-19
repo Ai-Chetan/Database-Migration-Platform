@@ -4,11 +4,26 @@ from backend.control_plane.app.models.migration import MigrationJob
 import uuid
 
 class MigrationJobRepository:
-    def create_job(self, db: Session, config: dict = None) -> MigrationJob:
-        job = MigrationJob(id=str(uuid.uuid4()), config=config, status="PENDING")
+
+    def create_job(
+        self,
+        db,
+        source_config: dict,
+        target_config: dict,
+        tenant_id: str = "local"
+    ):
+
+        job = MigrationJob(
+            tenant_id=tenant_id,
+            status="pending",
+            source_config=source_config,
+            target_config=target_config
+        )
+
         db.add(job)
         db.commit()
         db.refresh(job)
+
         return job
 
     def get_job_by_id(self, db: Session, job_id: str) -> Optional[MigrationJob]:
