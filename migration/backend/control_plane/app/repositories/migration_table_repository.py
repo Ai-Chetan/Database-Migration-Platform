@@ -3,18 +3,29 @@ from sqlalchemy.orm import Session
 from backend.control_plane.app.models.migration import MigrationTable
 import uuid
 
+from backend.control_plane.app.models.migration import MigrationTable
+
+
 class MigrationTableRepository:
-    def create_table_entry(self, db: Session, job_id: str, source_table: str, target_table: str) -> MigrationTable:
+
+    def create_table_entry(
+        self,
+        db,
+        job_id,
+        table_name,
+        primary_key_column="id"
+    ):
         table = MigrationTable(
-            id=str(uuid.uuid4()),
             job_id=job_id,
-            source_table_name=source_table,
-            target_table_name=target_table,
-            status="PENDING"
+            table_name=table_name,
+            primary_key_column=primary_key_column,
+            status="pending"
         )
+
         db.add(table)
         db.commit()
         db.refresh(table)
+
         return table
 
     def update_table_status(self, db: Session, table_id: str, status: str) -> Optional[MigrationTable]:

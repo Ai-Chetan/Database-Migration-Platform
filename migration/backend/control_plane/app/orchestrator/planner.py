@@ -9,7 +9,7 @@ class Planner:
         self.chunk_repo = MigrationChunkRepository()
         self.queue_service = QueueService()
 
-    def generate_chunks(self, db: Session, job_id: str, table_id: str, total_rows: int, chunk_size: int = 100000):
+    def generate_chunks(self, db: Session, job_id: str, table_id: str, table_name: str, total_rows: int, chunk_size: int = 100000):
         logger.info("Generating chunks", job_id=job_id, table_id=table_id, total_rows=total_rows)
         # Using a simple 1 to total_rows assumption for MVP PK range
         chunks = generate_pk_chunks(1, total_rows, chunk_size)
@@ -19,9 +19,10 @@ class Planner:
             chunks_data.append({
                 "job_id": job_id,
                 "table_id": table_id,
-                "min_pk": str(min_pk),
-                "max_pk": str(max_pk),
-                "status": "PENDING"
+                "pk_start": min_pk,
+                "pk_end": max_pk,
+                "status": "pending",
+                "table_name": table_name
             })
             
         created_chunks = self.chunk_repo.bulk_create_chunks(db, chunks_data)

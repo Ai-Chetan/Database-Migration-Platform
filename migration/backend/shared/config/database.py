@@ -3,9 +3,18 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 from backend.shared.config.settings import settings
 from backend.shared.exceptions.database import DatabaseException
+from urllib.parse import quote_plus
 
 def get_database_url() -> str:
-    return f"postgresql://{settings.postgres_user}:{settings.postgres_password}@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
+    password = quote_plus(settings.postgres_password)
+
+    return (
+        f"postgresql://{settings.postgres_user}:"
+        f"{password}@"
+        f"{settings.postgres_host}:"
+        f"{settings.postgres_port}/"
+        f"{settings.postgres_db}"
+    )
 
 engine = create_engine(
     get_database_url(),
@@ -39,4 +48,5 @@ def check_database_connection() -> bool:
         return True
     except SQLAlchemyError as e:
         raise DatabaseException(code="DB_CONNECTION_FAILED", message="Failed to connect to the database", details={"error": str(e)})
+
 

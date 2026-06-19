@@ -1,33 +1,34 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
+
 class Settings(BaseSettings):
     # Application
-    app_name: str = "Migration Platform"
-    app_env: str = "development"
-    app_version: str = "1.0.0"
-    debug: bool = True
+    app_name: str
+    app_env: str
+    app_version: str
+    debug: bool
 
     # Database
-    postgres_host: str = "localhost"
-    postgres_port: int = 5432
-    postgres_db: str = "migration_db"
-    postgres_user: str = "postgres"
-    postgres_password: str = "postgres"
+    postgres_host: str
+    postgres_port: int
+    postgres_db: str
+    postgres_user: str
+    postgres_password: str
 
     # Redis
-    redis_host: str = "localhost"
-    redis_port: int = 6379
+    redis_host: str
+    redis_port: int
     redis_password: Optional[str] = None
 
     # Security
-    jwt_secret: str = "supersecretkey"  # change in production
-    jwt_algorithm: str = "HS256"
-    jwt_expiration_minutes: int = 60
+    jwt_secret: str
+    jwt_algorithm: str
+    jwt_expiration_minutes: int
 
     # Monitoring
-    prometheus_enabled: bool = True
-    log_level: str = "INFO"
+    prometheus_enabled: bool
+    log_level: str
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -35,5 +36,6 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore"
     )
+
 
 settings = Settings()

@@ -16,17 +16,32 @@ def test_milestone():
     
     # 2. Create Job
     job_manager = JobManager()
-    job_id = job_manager.create_job(db, config={"source": "mysql", "target": "postgres"})
-    print(f"Created Job: {job_id}")
+    job = job_manager.create_job(
+        db=db,
+        source_config={
+            "engine": "mysql"
+        },
+        target_config={
+            "engine": "postgres"
+        }
+    )
+
+    job_id = job.id
+    print(f"Created Job: {job.id}")
     
     # 3. Create Table Entry
     table_repo = MigrationTableRepository()
-    table = table_repo.create_table_entry(db, job_id, "users_src", "users_tgt")
+    table = table_repo.create_table_entry(
+        db=db,
+        job_id=job.id,
+        table_name="users",
+        primary_key_column="id"
+    )
     print(f"Created Table Entry: {table.id}")
     
     # 4. Generate Chunks & publish to Redis
     planner = Planner()
-    chunks = planner.generate_chunks(db, job_id, table.id, 500000, 100000)
+    chunks = planner.generate_chunks(db, job_id, table.id, table.table_name, 500000, 100000)
     print(f"Generated {len(chunks)} chunks.")
     
     # 5. Verify Redis

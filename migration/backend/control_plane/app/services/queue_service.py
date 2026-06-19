@@ -6,13 +6,13 @@ from backend.shared.config.logging import logger
 class QueueService:
     def publish_chunk(self, job_id: str, table_id: str, chunk_id: str, priority: int = 1):
         message = {
-            "job_id": job_id,
-            "table_id": table_id,
-            "chunk_id": chunk_id,
+            "job_id": str(job_id),
+            "table_id": str(table_id),
+            "chunk_id": str(chunk_id),
             "priority": priority
         }
         logger.info("Publishing chunk to queue", chunk_id=chunk_id)
-        redis_client.lpush(Queues.MIGRATION_QUEUE, json.dumps(message))
+        redis_client.lpush(Queues.MIGRATION_QUEUE, json.dumps(message, default=str))
 
     def publish_retry(self, job_id: str, table_id: str, chunk_id: str):
         message = {
