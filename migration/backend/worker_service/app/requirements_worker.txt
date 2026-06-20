@@ -1,0 +1,20 @@
+# Worker Service Requirements
+# Add these to your existing requirements.txt
+# Install with: pip install -r requirements_worker.txt
+
+# Already in your project (listed for reference):
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+redis>=5.0.0
+python-dotenv>=1.0.0
+
+# New packages needed for the Worker Service:
+
+# MySQL connectivity
+mysql-connector-python>=8.3.0
+
+# System metrics for heartbeat (CPU, memory)
+psutil>=5.9.0
+
+# Structured logging (if not already installed)
+structlog>=24.1.0
