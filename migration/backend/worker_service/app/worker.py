@@ -1,23 +1,25 @@
 """
-Worker — Updated with Reliability Layer
+Worker — Multi-Worker Ready
 File: migration/backend/worker_service/app/worker.py
 
-This replaces the previous worker.py.
+REPLACES the previous worker.py.
 
-What changed from the original:
-    1. On startup, runs ResumeManager.resume_incomplete_jobs()
-       → Finds all PENDING/RUNNING/RETRYING chunks from before the restart
-       → Pushes them back to Redis so they get processed
-    2. Starts StaleChunkRecovery background thread
-       → Every 60 seconds, scans for chunks stuck in RUNNING
-       → Requeues them so the job can complete
-    3. Everything else stays the same (BRPOP loop, ChunkExecutor)
+What changed for Priority 6:
+    - heartbeat.set_busy(chunk_id) called before each chunk executes
+    - heartbeat.set_idle() called after each chunk finishes
+    - This means the worker_heartbeats table shows exactly which chunk
+      each worker is processing at any moment
 
-The startup sequence:
-    1. Register heartbeat
-    2. Run resume scan (blocks until complete)
-    3. Start stale chunk recovery thread (background)
-    4. Start polling loop (blocks forever)
+    Multi-worker works automatically because:
+        BRPOP is atomic — Redis guarantees each message goes to exactly
+        one worker. Run 4x `python main.py` and Redis distributes chunks.
+
+Worker lifecycle with status:
+    startup        → STARTING
+    resume scan    → STARTING
+    polling loop   → IDLE  (between chunks)
+    executing      → BUSY  (during chunk)
+    shutdown       → STOPPING → OFFLINE
 """
 
 import time
@@ -34,87 +36,81 @@ from backend.worker_service.app.stale_chunk_recovery import StaleChunkRecovery
 
 
 class Worker:
+
     def __init__(self, worker_id: str):
-        self.worker_id = worker_id
-        self.running = True
-        self.executor = ChunkExecutor(worker_id=worker_id)
-        self.heartbeat = HeartbeatManager(worker_id=worker_id)
+        self.worker_id      = worker_id
+        self.running        = True
+        self.executor       = ChunkExecutor(worker_id=worker_id)
+        self.heartbeat      = HeartbeatManager(worker_id=worker_id)
         self.resume_manager = ResumeManager()
         self.stale_recovery = StaleChunkRecovery()
 
     def run(self):
-        """
-        Full worker lifecycle:
-            startup → resume → stale detection → polling loop → shutdown
-        """
         logger.info("Worker starting", worker_id=self.worker_id)
 
-        # ── 1. Start heartbeat ────────────────────────────────────────────
+        # 1. Heartbeat — marks worker STARTING in DB immediately
         self.heartbeat.start()
 
-        # ── 2. Resume incomplete jobs ─────────────────────────────────────
-        # This is the most important startup step.
-        # Scans PostgreSQL for any chunks that were in progress when the
-        # previous worker process died. Pushes them back to Redis.
-        logger.info("Running resume scan on startup...", worker_id=self.worker_id)
+        # 2. Resume scan — pushes unfinished chunks back to Redis
+        #    Only one worker needs to do this, but running it on all workers
+        #    is safe because ResumeManager is idempotent (checks status before pushing)
+        logger.info("Running resume scan...", worker_id=self.worker_id)
         db = next(get_db())
         try:
             self.resume_manager.resume_incomplete_jobs(db)
         finally:
             db.close()
-        logger.info("Resume scan complete", worker_id=self.worker_id)
 
-        # ── 3. Start stale chunk recovery background thread ───────────────
-        # Runs every 60 seconds in the background.
-        # Finds RUNNING chunks with stale heartbeats and requeues them.
+        # 3. Stale chunk recovery background thread
         self.stale_recovery.start()
 
-        # ── 4. Main polling loop ──────────────────────────────────────────
-        logger.info("Entering main polling loop", worker_id=self.worker_id)
+        # 4. Main polling loop
+        logger.info("Worker ready — polling queue", worker_id=self.worker_id)
         while self.running:
             try:
                 self._poll_and_process()
             except KeyboardInterrupt:
-                logger.info("Worker interrupted", worker_id=self.worker_id)
+                logger.info("Keyboard interrupt", worker_id=self.worker_id)
                 self.running = False
             except Exception as e:
-                logger.error(
-                    "Unexpected error in worker loop",
-                    worker_id=self.worker_id,
-                    error=str(e)
-                )
+                logger.error("Unexpected error in worker loop", error=str(e), worker_id=self.worker_id)
                 time.sleep(3)
 
-        # ── 5. Graceful shutdown ──────────────────────────────────────────
+        # 5. Graceful shutdown
         self.stale_recovery.stop()
-        self.heartbeat.stop()
+        self.heartbeat.stop()          # writes OFFLINE to DB
         logger.info("Worker stopped", worker_id=self.worker_id)
 
     def _poll_and_process(self):
         """
-        Block on Redis for up to 5 seconds waiting for a chunk message.
-        When one arrives, execute it.
+        Block on Redis for up to 5 seconds.
+        If a message arrives, execute the chunk and track heartbeat state.
         """
+        # BRPOP: atomic blocking pop — exactly one worker gets each message
         result = redis_client.brpop(Queues.MIGRATION_QUEUE, timeout=5)
 
         if result is None:
+            # No message — stay IDLE, loop again
             return
 
-        _, raw_message = result
+        _, raw = result
 
         try:
-            message = json.loads(raw_message)
+            message = json.loads(raw)
         except json.JSONDecodeError as e:
-            logger.error("Failed to parse queue message", raw=str(raw_message), error=str(e))
+            logger.error("Bad queue message", raw=str(raw), error=str(e))
             return
 
-        job_id = message.get("job_id")
+        job_id   = message.get("job_id")
         table_id = message.get("table_id")
         chunk_id = message.get("chunk_id")
 
         if not all([job_id, table_id, chunk_id]):
-            logger.error("Invalid message format", message=message)
+            logger.error("Message missing fields", message=message)
             return
+
+        # ── Mark BUSY before executing ────────────────────────────────────
+        self.heartbeat.set_busy(chunk_id=chunk_id)
 
         logger.info(
             "Processing chunk",
@@ -133,3 +129,5 @@ class Worker:
             )
         finally:
             db.close()
+            # ── Back to IDLE after chunk (success or failure) ─────────────
+            self.heartbeat.set_idle()
