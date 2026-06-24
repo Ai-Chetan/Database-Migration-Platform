@@ -1,0 +1,49 @@
+# Prometheus Configuration
+# File: migration/observability/prometheus/prometheus.yml
+#
+# This tells Prometheus where to scrape metrics from.
+#
+# Start Prometheus:
+#   docker run -d \
+#     -p 9090:9090 \
+#     -v $(pwd)/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml \
+#     prom/prometheus
+#
+# Then open: http://localhost:9090
+#
+# Example queries in Prometheus UI:
+#   migration_rows_processed_total
+#   rate(migration_rows_processed_total[1m])
+#   migration_redis_queue_depth
+#   migration_worker_cpu_usage_percent
+
+global:
+  scrape_interval: 15s      # How often to scrape
+  evaluation_interval: 15s  # How often to evaluate rules
+
+scrape_configs:
+
+  # Scrape worker metrics
+  # Each worker exposes :8002/metrics
+  # If running multiple workers on different machines, add each host here
+  - job_name: "migration_workers"
+    static_configs:
+      - targets:
+          - "localhost:8002"
+        labels:
+          environment: "development"
+
+  # Scrape Prometheus itself
+  - job_name: "prometheus"
+    static_configs:
+      - targets:
+          - "localhost:9090"
+
+# Alerting rules
+rule_files:
+  - "rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []   # Add alertmanager here when ready
