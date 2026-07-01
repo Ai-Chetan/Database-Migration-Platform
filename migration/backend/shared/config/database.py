@@ -31,6 +31,8 @@ SessionFactory = sessionmaker(
     autoflush=False
 )
 
+SessionLocal = SessionFactory
+
 Base = declarative_base()
 
 def get_db():
