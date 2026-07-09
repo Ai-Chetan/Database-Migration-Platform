@@ -233,12 +233,12 @@ class PluginManager:
                              capabilities, is_active, is_builtin, created_at, updated_at)
                         VALUES
                             (:tid, :ptype, :name, :dname, :version,
-                             :caps::jsonb, TRUE, :builtin, :now, :now)
+                             CAST(:caps AS jsonb), TRUE, :builtin, :now, :now)
                         ON CONFLICT (tenant_id, plugin_type, name)
                         DO UPDATE SET
                             display_name = :dname,
                             version      = :version,
-                            capabilities = :caps::jsonb,
+                            capabilities = CAST(:caps AS jsonb),
                             updated_at   = :now
                     """),
                     {
