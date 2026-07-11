@@ -1,0 +1,59 @@
+# Prometheus Alerting Rules
+# File: migration/observability/prometheus/rules.yml
+#
+# These rules fire alerts when things go wrong.
+# Viewable at: http://localhost:9090/rules
+
+groups:
+  - name: migration_alerts
+    rules:
+
+      # Worker went offline (heartbeat stopped)
+      - alert: WorkerOffline
+        expr: time() - migration_worker_last_heartbeat_timestamp > 900
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} is offline"
+          description: "No heartbeat for >15 minutes"
+
+      # Redis queue is backing up — workers can't keep up
+      - alert: QueueBacklogHigh
+        expr: migration_redis_queue_depth > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Migration queue backlog is high"
+          description: "Queue depth: {{ $value }} chunks waiting"
+
+      # Retry queue growing — many chunks are failing
+      - alert: RetryQueueGrowing
+        expr: migration_redis_retry_queue_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Many chunks are being retried"
+          description: "Retry queue depth: {{ $value }}"
+
+      # Chunk failure rate spiking
+      - alert: ChunkFailureRateHigh
+        expr: rate(migration_chunks_failed_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Chunk failure rate is high"
+          description: "{{ $value }} failures/sec over last 5 minutes"
+
+      # Checksum failures detected (data integrity issue)
+      - alert: ChecksumFailureDetected
+        expr: increase(migration_checksum_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Checksum validation failure detected"
+          description: "Data integrity issue in table {{ $labels.table_name }}"

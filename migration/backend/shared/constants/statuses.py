@@ -1,0 +1,24 @@
+class MigrationJobStatus:
+    PENDING = "PENDING"
+    PLANNING = "PLANNING"
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
+    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+class ChunkStatus:
+    PENDING = "PENDING"
+    ASSIGNED = "ASSIGNED"
+    RUNNING = "RUNNING"
+    FAILED = "FAILED"
+    RETRYING = "RETRYING"
+    COMPLETED = "COMPLETED"
+
+class WorkerStatus:
+    ONLINE = "ONLINE"
+    BUSY = "BUSY"
+    IDLE = "IDLE"
+    OFFLINE = "OFFLINE"
+    UNHEALTHY = "UNHEALTHY"
