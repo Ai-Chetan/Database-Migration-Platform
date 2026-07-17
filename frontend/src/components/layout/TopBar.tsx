@@ -1,16 +1,27 @@
 import React, { useState } from 'react'
-import { Bell, ChevronDown, LogOut, User as UserIcon } from 'lucide-react'
+import { Bell, ChevronDown, LogOut, User as UserIcon, Search } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { ROLE_LABELS } from '@/utils/permissions'
 import { cn } from '@/utils/cn'
+import { useUIStore } from '@/store/ui'
 
 export function TopBar() {
   const { user, logout } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
+  const setCommandPaletteOpen = useUIStore((s) => s.setCommandPaletteOpen)
 
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-white px-6">
-      <div />
+      <button
+        onClick={() => setCommandPaletteOpen(true)}
+        className="flex items-center gap-2 rounded border border-border bg-surface px-3 py-1.5 text-small text-text-tertiary transition-colors hover:border-border-strong hover:text-text-secondary"
+      >
+        <Search className="h-3.5 w-3.5" />
+        <span>Search…</span>
+        <kbd className="ml-6 rounded border border-border bg-white px-1.5 py-0.5 text-tiny text-text-tertiary">
+          ⌘K
+        </kbd>
+      </button>
 
       <div className="flex items-center gap-4">
         <button className="relative text-text-secondary hover:text-text-primary">

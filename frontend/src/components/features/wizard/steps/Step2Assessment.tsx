@@ -53,19 +53,19 @@ export function Step2Assessment({ state, update }: Props) {
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Card padding="sm">
           <p className="text-tiny text-text-secondary">Tables</p>
-          <p className="mt-1 text-h3 text-text-primary">{formatNumber(a.total_tables)}</p>
+          <p className="mono mt-1 text-h3 tabular-nums text-text-primary">{formatNumber(a.total_tables)}</p>
         </Card>
         <Card padding="sm">
           <p className="text-tiny text-text-secondary">Rows</p>
-          <p className="mt-1 text-h3 text-text-primary">{formatNumber(a.total_rows)}</p>
+          <p className="mono mt-1 text-h3 tabular-nums text-text-primary">{formatNumber(a.total_rows)}</p>
         </Card>
         <Card padding="sm">
           <p className="text-tiny text-text-secondary">Size</p>
-          <p className="mt-1 text-h3 text-text-primary">{formatGB(a.total_size_gb)}</p>
+          <p className="mono mt-1 text-h3 tabular-nums text-text-primary">{formatGB(a.total_size_gb)}</p>
         </Card>
         <Card padding="sm">
           <p className="text-tiny text-text-secondary">Est. duration</p>
-          <p className="mt-1 text-h3 text-text-primary">{a.estimated_duration}</p>
+          <p className="mono mt-1 text-h3 tabular-nums text-text-primary">{a.estimated_duration}</p>
         </Card>
       </div>
 

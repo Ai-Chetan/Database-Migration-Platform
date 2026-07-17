@@ -2,6 +2,7 @@ import React from 'react'
 import { Outlet } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { TopBar } from './TopBar'
+import { CommandPalette } from '@/components/common/CommandPalette'
 
 export function AppLayout() {
   return (
@@ -13,6 +14,7 @@ export function AppLayout() {
           <Outlet />
         </main>
       </div>
+      <CommandPalette />
     </div>
   )
 }

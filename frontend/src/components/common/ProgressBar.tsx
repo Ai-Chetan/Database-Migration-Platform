@@ -28,7 +28,7 @@ export function ProgressBar({ value, tone = 'action', size = 'md', showLabel, cl
           style={{ width: `${clamped}%` }}
         />
       </div>
-      {showLabel && <div className="mt-1 text-tiny text-text-secondary">{clamped.toFixed(1)}%</div>}
+      {showLabel && <div className="mt-1 text-tiny tabular-nums text-text-secondary">{clamped.toFixed(1)}%</div>}
     </div>
   )
 }

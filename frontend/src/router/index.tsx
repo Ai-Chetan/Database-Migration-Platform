@@ -1,30 +1,35 @@
-import React, { Suspense } from 'react'
+import React, { Suspense, lazy } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { PublicLayout } from '@/components/layout/PublicLayout'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { ProtectedRoute, RequirePermission } from './ProtectedRoute'
 import { FullPageSpinner } from '@/components/common'
 
-import Landing from '@/pages/public/Landing'
-import Login from '@/pages/public/Login'
-import ForgotPassword from '@/pages/public/ForgotPassword'
-import Dashboard from '@/pages/Dashboard'
-import Connections from '@/pages/Connections'
-import JobsList from '@/pages/JobsList'
-import NewMigration from '@/pages/NewMigration'
-import JobDetail from '@/pages/jobs/JobDetail'
-import OperationsConsole from '@/pages/operations/OperationsConsole'
-import SchemaExplorer from '@/pages/SchemaExplorer'
-import Simulation from '@/pages/Simulation'
-import Masking from '@/pages/Masking'
-import Scheduler from '@/pages/Scheduler'
-import Reports from '@/pages/Reports'
-import KnowledgeBase from '@/pages/KnowledgeBase'
-import Settings from '@/pages/Settings'
-import UserManagement from '@/pages/admin/UserManagement'
-import AuditLog from '@/pages/admin/AuditLog'
+// Public pages are lazy too - keeps the very first paint (before auth is even known)
+// as small as possible. AccessDenied/NotFound stay eager: they're tiny and are
+// sometimes rendered outside a Suspense boundary (top-level catch-all route).
 import AccessDenied from '@/pages/AccessDenied'
 import NotFound from '@/pages/NotFound'
+
+const Landing = lazy(() => import('@/pages/public/Landing'))
+const Login = lazy(() => import('@/pages/public/Login'))
+const ForgotPassword = lazy(() => import('@/pages/public/ForgotPassword'))
+
+const Dashboard = lazy(() => import('@/pages/Dashboard'))
+const Connections = lazy(() => import('@/pages/Connections'))
+const JobsList = lazy(() => import('@/pages/JobsList'))
+const NewMigration = lazy(() => import('@/pages/NewMigration'))
+const JobDetail = lazy(() => import('@/pages/jobs/JobDetail'))
+const OperationsConsole = lazy(() => import('@/pages/operations/OperationsConsole'))
+const SchemaExplorer = lazy(() => import('@/pages/SchemaExplorer'))
+const Simulation = lazy(() => import('@/pages/Simulation'))
+const Masking = lazy(() => import('@/pages/Masking'))
+const Scheduler = lazy(() => import('@/pages/Scheduler'))
+const Reports = lazy(() => import('@/pages/Reports'))
+const KnowledgeBase = lazy(() => import('@/pages/KnowledgeBase'))
+const Settings = lazy(() => import('@/pages/Settings'))
+const UserManagement = lazy(() => import('@/pages/admin/UserManagement'))
+const AuditLog = lazy(() => import('@/pages/admin/AuditLog'))
 
 function withSuspense(node: React.ReactNode) {
   return <Suspense fallback={<FullPageSpinner />}>{node}</Suspense>
@@ -34,9 +39,9 @@ export const router = createBrowserRouter([
   {
     element: <PublicLayout />,
     children: [
-      { path: '/', element: <Landing /> },
-      { path: '/login', element: <Login /> },
-      { path: '/forgot-password', element: <ForgotPassword /> },
+      { path: '/', element: withSuspense(<Landing />) },
+      { path: '/login', element: withSuspense(<Login />) },
+      { path: '/forgot-password', element: withSuspense(<ForgotPassword />) },
     ],
   },
   {

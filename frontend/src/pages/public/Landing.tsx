@@ -11,6 +11,7 @@ import {
   ArrowRight,
 } from 'lucide-react'
 import { Button } from '@/components/common'
+import { AuthVisualPanel } from '@/components/features/auth/AuthVisualPanel'
 
 const APP_NAME = import.meta.env.VITE_APP_NAME || 'Migration Platform'
 const TAGLINE =
@@ -126,37 +127,66 @@ export default function Landing() {
       </header>
 
       {/* Hero */}
-      <section className="mx-auto max-w-4xl px-6 pb-20 pt-24 text-center">
-        <h1 className="text-h1 text-text-primary md:text-5xl">{TAGLINE}</h1>
-        <p className="mx-auto mt-5 max-w-2xl text-body text-text-secondary md:text-lg">
-          Assess, simulate, mask, migrate, and validate database migrations from a single control plane —
-          built for teams who need enterprise-grade reliability without the enterprise price tag.
-        </p>
-        <div className="mt-8 flex items-center justify-center gap-3">
-          <Link to="/login">
-            <Button size="lg" rightIcon={<ArrowRight className="h-4 w-4" />}>
-              Start migrating
-            </Button>
-          </Link>
-          <a href="#features">
-            <Button size="lg" variant="secondary">
-              See how it works
-            </Button>
-          </a>
+      <section className="border-b border-border">
+        <div className="mx-auto grid max-w-6xl grid-cols-1 items-center gap-12 px-6 py-16 lg:grid-cols-2 lg:py-24">
+          <div>
+            <span className="inline-flex items-center gap-1.5 rounded-pill border border-border bg-surface px-2.5 py-1 text-tiny font-medium text-text-secondary">
+              <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse-dot" />
+              Now shipping the Simulation Engine
+            </span>
+            <h1 className="mt-5 text-h1 leading-[1.1] tracking-tight text-text-primary md:text-5xl">
+              {TAGLINE}
+            </h1>
+            <p className="mt-5 max-w-lg text-body text-text-secondary md:text-lg">
+              Assess, simulate, mask, migrate, and validate database migrations from a single
+              control plane — built for teams who need enterprise-grade reliability without the
+              enterprise price tag.
+            </p>
+            <div className="mt-8 flex flex-wrap items-center gap-3">
+              <Link to="/login">
+                <Button size="lg" rightIcon={<ArrowRight className="h-4 w-4" />}>
+                  Start migrating
+                </Button>
+              </Link>
+              <a href="#features">
+                <Button size="lg" variant="secondary">
+                  See how it works
+                </Button>
+              </a>
+            </div>
+            <div className="mt-10 flex items-center gap-6 text-tiny text-text-tertiary">
+              <span className="mono">99.98% job success rate</span>
+              <span className="h-1 w-1 rounded-full bg-border-strong" />
+              <span className="mono">SOC 2 Type II in progress</span>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-lg border border-border shadow-sm">
+            <AuthVisualPanel className="h-[420px]" />
+          </div>
         </div>
       </section>
 
       {/* Features */}
-      <section id="features" className="border-t border-border bg-surface py-20">
+      <section id="features" className="bg-surface py-20">
         <div className="mx-auto max-w-6xl px-6">
-          <h2 className="text-center text-h2 text-text-primary">Everything a migration team needs</h2>
-          <div className="mt-12 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {FEATURES.map((f) => (
-              <div key={f.title} className="rounded border border-border bg-white p-6 shadow-sm">
-                <div className="mb-4 flex h-10 w-10 items-center justify-center rounded bg-action/10">
-                  <f.icon className="h-5 w-5 text-action" />
+          <div className="max-w-xl">
+            <h2 className="text-h2 text-text-primary">Everything a migration team needs</h2>
+            <p className="mt-3 text-body text-text-secondary">
+              One control plane, six specialized engines — assessment, simulation, masking,
+              execution, monitoring, and reporting.
+            </p>
+          </div>
+          <div className="mt-12 grid grid-cols-1 divide-y divide-border border-t border-border md:grid-cols-2 md:divide-x md:divide-y-0 lg:grid-cols-3">
+            {FEATURES.map((f, i) => (
+              <div key={f.title} className="group bg-white p-8 transition-colors hover:bg-surface">
+                <div className="flex items-baseline gap-3">
+                  <span className="mono text-tiny text-text-tertiary">
+                    {String(i + 1).padStart(2, '0')}
+                  </span>
+                  <f.icon className="h-4 w-4 text-action" />
                 </div>
-                <h3 className="text-h4 text-text-primary">{f.title}</h3>
+                <h3 className="mt-4 text-h4 text-text-primary">{f.title}</h3>
                 <p className="mt-2 text-body text-text-secondary">{f.description}</p>
               </div>
             ))}
@@ -176,28 +206,34 @@ export default function Landing() {
               <div
                 key={tier.name}
                 className={
-                  'flex flex-col rounded border p-8 ' +
-                  (tier.highlighted
-                    ? 'border-action shadow-sm ring-1 ring-action'
-                    : 'border-border shadow-sm')
+                  tier.highlighted
+                    ? 'flex flex-col rounded-lg bg-sidebar-bg p-8 shadow-sm md:-my-4 md:py-12'
+                    : 'flex flex-col rounded-lg border border-border bg-white p-8'
                 }
               >
                 {tier.highlighted && (
-                  <span className="mb-3 inline-block w-fit rounded-pill bg-action/10 px-2 py-0.5 text-tiny font-medium text-action">
+                  <span className="mb-3 inline-block w-fit rounded-pill bg-action px-2 py-0.5 text-tiny font-medium text-white">
                     Most popular
                   </span>
                 )}
-                <h3 className="text-h4 text-text-primary">{tier.name}</h3>
-                <p className="mt-1 text-small text-text-secondary">{tier.description}</p>
-                <p className="mt-6 text-h1 text-text-primary">
+                <h3 className={`text-h4 ${tier.highlighted ? 'text-white' : 'text-text-primary'}`}>{tier.name}</h3>
+                <p className={`mt-1 text-small ${tier.highlighted ? 'text-sidebar-text' : 'text-text-secondary'}`}>
+                  {tier.description}
+                </p>
+                <p className={`mt-6 text-h1 tabular-nums ${tier.highlighted ? 'text-white' : 'text-text-primary'}`}>
                   {CURRENCY_SYMBOL}
                   {tier.price}
-                  <span className="text-body font-normal text-text-secondary">/{PERIOD}</span>
+                  <span className={`text-body font-normal ${tier.highlighted ? 'text-sidebar-text' : 'text-text-secondary'}`}>
+                    /{PERIOD}
+                  </span>
                 </p>
                 <ul className="mt-6 flex-1 space-y-3">
                   {tier.features.map((f) => (
-                    <li key={f} className="flex items-start gap-2 text-small text-text-secondary">
-                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                    <li
+                      key={f}
+                      className={`flex items-start gap-2 text-small ${tier.highlighted ? 'text-sidebar-text' : 'text-text-secondary'}`}
+                    >
+                      <Check className={`mt-0.5 h-4 w-4 shrink-0 ${tier.highlighted ? 'text-success' : 'text-success'}`} />
                       {f}
                     </li>
                   ))}

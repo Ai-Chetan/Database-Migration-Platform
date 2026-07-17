@@ -1,0 +1,1 @@
+import{r as s}from"./vendor-query-DS6bTBDZ.js";function u(t=!1){const[o,e]=s.useState(t),a=s.useCallback(()=>e(!0),[]),c=s.useCallback(()=>e(!1),[]),l=s.useCallback(()=>e(n=>!n),[]);return{isOpen:o,open:a,close:c,toggle:l}}export{u};

@@ -1,0 +1,1 @@
+import{b as s}from"./index-CruFncY9.js";const o={list:t=>s.get("/jobs",{params:t}).then(e=>e.data),get:t=>s.get(`/jobs/${t}`).then(e=>e.data),create:t=>s.post("/jobs",t).then(e=>e.data),start:t=>s.post(`/jobs/${t}/start`),remove:t=>s.delete(`/jobs/${t}`),liveStats:t=>s.get(`/ops/jobs/${t}/live-stats`).then(e=>e.data)};export{o as j};
