@@ -11,10 +11,6 @@ import {
   SkipForward,
   ShieldAlert,
   ArrowLeft,
-  Activity,
-  Users2,
-  Timer,
-  Database,
 } from 'lucide-react'
 import { jobsApi } from '@/api/jobs'
 import { operationsApi } from '@/api/operations'
@@ -34,21 +30,31 @@ import {
   Badge,
 } from '@/components/common'
 import { EngineIcon } from '@/components/common'
+import { Sparkline } from '@/components/common'
+import { useLiveSeries } from '@/hooks/useLiveSeries'
+import { ChunkStatusBar } from '@/components/features/jobs/ChunkStatusBar'
 import { formatNumber, formatDuration } from '@/utils/format'
 import { Worker, DriftEvent } from '@/types'
 
-function StatTile({ icon: Icon, label, value }: { icon: React.ElementType; label: string; value: string }) {
+function StatTile({
+  label,
+  value,
+  live,
+  sparkline,
+}: {
+  label: string
+  value: string
+  live?: boolean
+  sparkline?: React.ReactNode
+}) {
   return (
     <Card padding="sm">
-      <div className="flex items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded bg-action/10">
-          <Icon className="h-4 w-4 text-action" />
-        </div>
-        <div>
-          <p className="text-tiny text-text-secondary">{label}</p>
-          <p className="text-h4 text-text-primary">{value}</p>
-        </div>
-      </div>
+      <p className="flex items-center gap-1.5 text-tiny text-text-secondary">
+        {label}
+        {live && <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse-dot" />}
+      </p>
+      <p className="mono mt-0.5 text-h3 tabular-nums text-text-primary">{value}</p>
+      {sparkline}
     </Card>
   )
 }
@@ -124,11 +130,15 @@ export default function JobDetail() {
     },
   })
 
+  const isRunningLive = (liveStats?.status ?? job?.status) === 'running'
+  const throughputSeries = useLiveSeries(liveStats?.rows_per_sec, { active: isRunningLive, intervalMs: 2000 })
+
   if (jobLoading || !job) return <FullPageSpinner />
 
   const stats = liveStats
   const status = stats?.status ?? job.status
   const progress = stats?.progress_pct ?? job.progress_pct
+  const isRunning = status === 'running'
 
   const workerColumns: ColumnDef<Worker>[] = [
     { header: 'Worker', accessorKey: 'worker_id', cell: ({ getValue }) => <span className="mono text-small">{getValue<string>()}</span> },
@@ -226,10 +236,15 @@ export default function JobDetail() {
       </div>
 
       <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <StatTile icon={Database} label="Rows migrated" value={formatNumber(stats?.rows_migrated ?? job.rows_migrated)} />
-        <StatTile icon={Activity} label="Rows / sec" value={formatNumber(stats?.rows_per_sec)} />
-        <StatTile icon={Users2} label="Active workers" value={String(stats?.active_workers ?? 0)} />
-        <StatTile icon={Timer} label="ETA" value={stats?.eta_str ?? formatDuration(stats?.eta_seconds)} />
+        <StatTile label="Rows migrated" value={formatNumber(stats?.rows_migrated ?? job.rows_migrated)} live={isRunning} />
+        <StatTile
+          label="Rows / sec"
+          value={formatNumber(stats?.rows_per_sec)}
+          live={isRunning}
+          sparkline={<Sparkline data={throughputSeries} />}
+        />
+        <StatTile label="Active workers" value={String(stats?.active_workers ?? 0)} />
+        <StatTile label="ETA" value={stats?.eta_str ?? formatDuration(stats?.eta_seconds)} />
       </div>
 
       <Tabs
@@ -245,20 +260,18 @@ export default function JobDetail() {
 
       <div className="mt-5">
         {tab === 'overview' && stats && (
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
-            {[
-              { label: 'Completed', value: stats.completed_chunks, tone: 'success' as const },
-              { label: 'Running', value: stats.running_chunks, tone: 'info' as const },
-              { label: 'Pending', value: stats.pending_chunks, tone: 'neutral' as const },
-              { label: 'Failed', value: stats.failed_chunks, tone: 'error' as const },
-              { label: 'Skipped', value: stats.skipped_chunks, tone: 'warning' as const },
-            ].map((c) => (
-              <Card key={c.label} padding="sm">
-                <p className="text-tiny text-text-secondary">{c.label}</p>
-                <p className="mt-1 text-h3 text-text-primary">{formatNumber(c.value)}</p>
-              </Card>
-            ))}
-          </div>
+          <Card>
+            <p className="mb-4 text-small font-semibold text-text-primary">Chunk status</p>
+            <ChunkStatusBar
+              segments={[
+                { label: 'Completed', value: stats.completed_chunks, color: 'bg-success' },
+                { label: 'Running', value: stats.running_chunks, color: 'bg-info' },
+                { label: 'Pending', value: stats.pending_chunks, color: 'bg-border-strong' },
+                { label: 'Failed', value: stats.failed_chunks, color: 'bg-error' },
+                { label: 'Skipped', value: stats.skipped_chunks, color: 'bg-warning' },
+              ]}
+            />
+          </Card>
         )}
 
         {tab === 'workers' && <DataTable columns={workerColumns} data={workers} emptyMessage="No workers assigned yet" />}

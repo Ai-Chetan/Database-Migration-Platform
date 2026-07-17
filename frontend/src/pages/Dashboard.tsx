@@ -27,6 +27,8 @@ import {
 } from '@/components/common'
 import { formatNumber, formatRelativeTime } from '@/utils/format'
 import { useAuthStore } from '@/store/auth'
+import { useLiveThroughput } from '@/hooks/useLiveThroughput'
+import { ThroughputChart } from '@/components/features/dashboard/ThroughputChart'
 
 function KpiCard({
   icon: Icon,
@@ -34,20 +36,25 @@ function KpiCard({
   value,
   isLoading,
   accent,
+  live,
 }: {
   icon: React.ElementType
   label: string
   value: string
   isLoading?: boolean
   accent?: string
+  live?: boolean
 }) {
   if (isLoading) return <SkeletonCard />
   return (
-    <Card>
+    <Card hoverable>
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-small text-text-secondary">{label}</p>
-          <p className="mt-1 text-h2 text-text-primary">{value}</p>
+          <p className="flex items-center gap-1.5 text-small text-text-secondary">
+            {label}
+            {live && <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse-dot" />}
+          </p>
+          <p className="mt-1 text-h2 tabular-nums text-text-primary">{value}</p>
         </div>
         <div className={`flex h-10 w-10 items-center justify-center rounded ${accent || 'bg-action/10'}`}>
           <Icon className="h-5 w-5 text-action" />
@@ -69,9 +76,12 @@ export default function Dashboard() {
   const workers = workersQuery.data ?? []
 
   const activeJobs = jobs.filter((j) => j.status === 'running').length
+  const runningJobs = jobs.filter((j) => j.status === 'running')
   const totalRows = jobs.reduce((sum, j) => sum + (j.rows_migrated || 0), 0)
   const healthyConnections = connections.filter((c) => c.status === 'healthy').length
   const activeWorkers = workers.filter((w) => w.status === 'BUSY').length
+
+  const throughputSeries = useLiveThroughput(runningJobs)
 
   const isLoading = jobsQuery.isLoading || connectionsQuery.isLoading || workersQuery.isLoading
 
@@ -89,7 +99,13 @@ export default function Dashboard() {
 
       {/* KPI row */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCard icon={Workflow} label="Active jobs" value={formatNumber(activeJobs)} isLoading={isLoading} />
+        <KpiCard
+          icon={Workflow}
+          label="Active jobs"
+          value={formatNumber(activeJobs)}
+          isLoading={isLoading}
+          live={activeJobs > 0}
+        />
         <KpiCard icon={Database} label="Rows migrated" value={formatNumber(totalRows)} isLoading={isLoading} />
         <KpiCard
           icon={Plug}
@@ -98,6 +114,10 @@ export default function Dashboard() {
           isLoading={isLoading}
         />
         <KpiCard icon={Users2} label="Active workers" value={formatNumber(activeWorkers)} isLoading={isLoading} />
+      </div>
+
+      <div className="mb-6">
+        <ThroughputChart series={throughputSeries} activeJobCount={activeJobs} />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -183,7 +203,7 @@ export default function Dashboard() {
                       <span className="h-2 w-2 shrink-0 rounded-full bg-success" title="Healthy" />
                     )}
                     {c.status === 'failed' && (
-                      <AlertTriangle className="h-4 w-4 shrink-0 text-error" title="Failed" />
+                      <AlertTriangle className="h-4 w-4 shrink-0 text-error" aria-label="Failed" />
                     )}
                     {c.status === 'untested' && (
                       <span className="h-2 w-2 shrink-0 rounded-full bg-text-tertiary" title="Untested" />

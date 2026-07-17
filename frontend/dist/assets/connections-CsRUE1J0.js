@@ -1,0 +1,1 @@
+import{b as e}from"./index-CruFncY9.js";const a={list:()=>e.get("/connections").then(t=>t.data),get:t=>e.get(`/connections/${t}`).then(n=>n.data),create:t=>e.post("/connections",t).then(n=>n.data),update:(t,n)=>e.put(`/connections/${t}`,n).then(o=>o.data),remove:t=>e.delete(`/connections/${t}`),test:t=>e.post(`/connections/${t}/test`).then(n=>n.data)};export{a as c};

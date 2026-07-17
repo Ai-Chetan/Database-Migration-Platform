@@ -17,6 +17,7 @@ import {
 } from '@/components/common'
 import { formatDateTime } from '@/utils/format'
 import { usePermission } from '@/hooks/usePermission'
+import { WorkerFleetGrid } from '@/components/features/operations/WorkerFleetGrid'
 
 export default function OperationsConsole() {
   const queryClient = useQueryClient()
@@ -99,6 +100,10 @@ export default function OperationsConsole() {
   return (
     <div>
       <PageHeader title="Operations Console" description="Live control over the worker fleet across all running migrations." />
+
+      <div className="mb-6">
+        <WorkerFleetGrid workers={workers} />
+      </div>
 
       <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Card padding="sm">
