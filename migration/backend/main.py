@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from backend.shared.middleware.route_permissions import RBACMiddleware
 
 app = FastAPI(
     title="Migration Platform Kernel",
@@ -62,6 +63,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(RBACMiddleware)
 
 # ── Import and register all routers ───────────────────────────────────────────
 # Each import is wrapped in try/except so one missing module doesn't
@@ -382,3 +385,16 @@ def root():
         "docs":    "http://localhost:8000/docs",
         "health":  "http://localhost:8000/health",
     }
+
+
+from backend.routers import auth as auth_router
+from backend.routers import users as users_router
+
+app.include_router(auth_router.router)
+app.include_router(users_router.router)
+
+from backend.routers import auth as auth_router
+from backend.routers import users as users_router
+
+app.include_router(auth_router.router)
+app.include_router(users_router.router)

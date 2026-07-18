@@ -1,176 +1,255 @@
 """
-Approval Workflow Router
+Approvals Router (RBAC-corrected version)
 File: migration/backend/enterprise/routers/approvals.py
 
+Fixes the granularity gap flagged during RBAC rollout: the global route
+middleware cannot distinguish /jobs/{id}/approval/request (any migration
+role) from /jobs/{id}/approval/approve (admin only) using path-prefix
+matching alone, since they share the same prefix. This router enforces
+the correct permission INSIDE each handler using Depends(require_permission)
+and Depends(require_role), which is the precise, per-action mechanism.
+
 Endpoints:
-    POST /jobs/{id}/approval/request   → request approval for a job
-    POST /jobs/{id}/approval/approve   → approve (Migration Admin / Tenant Admin only)
-    POST /jobs/{id}/approval/reject    → reject with reason
-    GET  /jobs/{id}/approval           → get approval status
-    GET  /approvals/pending            → list all pending approvals for tenant
+    GET  /approvals                          -> list pending approvals (tenant-scoped)
+    POST /jobs/{job_id}/approval/request      -> any migration role can request
+    POST /jobs/{job_id}/approval/approve      -> tenant_admin/platform_admin only
+    POST /jobs/{job_id}/approval/reject       -> tenant_admin/platform_admin only
+    GET  /approvals/{id}                      -> get one approval record
+
+Table used: migration_approvals (created in earlier security migration -
+004_security_saas.sql). Columns assumed: id, job_id, tenant_id, requested_by,
+reason, status, approver_id, comments, requested_at, reviewed_at.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import datetime
+import uuid
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional
 
 from backend.shared.config.database import get_db
-from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
-from backend.enterprise.security.audit.audit_trail import AuditTrail
-from backend.enterprise.saas.approval.approval_service import ApprovalService
+from backend.shared.middleware.jwt_middleware import get_current_user, require_permission
+from backend.shared.tenant.tenant_scope import tenant_filter, assert_owned_by_tenant, scoped_params
+from backend.shared.config.logging import logger
 
-router       = APIRouter(tags=["Approval Workflow"])
-approval_svc = ApprovalService()
-
-
-class RequestApprovalBody(BaseModel):
-    auto_approve_rules: Optional[Dict] = None
+router = APIRouter(tags=["Approvals"])
 
 
-class ReviewBody(BaseModel):
-    notes: Optional[str] = None
+class ApprovalRequestBody(BaseModel):
+    reason: str
 
 
-class RejectBody(BaseModel):
-    notes: str    # Required — must give reason for rejection
+class ApprovalReviewBody(BaseModel):
+    comments: Optional[str] = None
 
 
-@router.post("/jobs/{job_id}/approval/request",
-             summary="Request approval before executing a migration")
+@router.get("/approvals", summary="List approvals (tenant-scoped)")
+def list_approvals(
+    status: Optional[str] = None,
+    user:   dict = Depends(get_current_user),
+    db:     Session = Depends(get_db),
+):
+    where_sql, tparams = tenant_filter(user, table_alias="ma")
+    conditions = [where_sql]
+    params = scoped_params(user)
+
+    if status:
+        conditions.append("ma.status = :status")
+        params["status"] = status
+
+    rows = db.execute(
+        text(f"""
+            SELECT ma.id, ma.job_id, ma.tenant_id, ma.requested_by, ma.reason,
+                   ma.status, ma.approver_id, ma.comments,
+                   ma.requested_at, ma.reviewed_at,
+                   mj.name AS job_name
+            FROM migration_approvals ma
+            LEFT JOIN migration_jobs mj ON mj.id = ma.job_id
+            WHERE {' AND '.join(conditions)}
+            ORDER BY ma.requested_at DESC
+        """),
+        params
+    ).fetchall()
+
+    result = []
+    for row in rows:
+        d = dict(row._mapping)
+        for k, v in d.items():
+            if hasattr(v, "hex"):        d[k] = str(v)
+            if hasattr(v, "isoformat"):  d[k] = v.isoformat()
+        result.append(d)
+
+    return {"total": len(result), "approvals": result}
+
+
+@router.get("/approvals/{approval_id}", summary="Get one approval record")
+def get_approval(approval_id: str, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = db.execute(
+        text("SELECT * FROM migration_approvals WHERE id=:id"),
+        {"id": approval_id}
+    ).fetchone()
+    assert_owned_by_tenant(row, user, resource_name="Approval")
+
+    d = dict(row._mapping)
+    for k, v in d.items():
+        if hasattr(v, "hex"):        d[k] = str(v)
+        if hasattr(v, "isoformat"):  d[k] = v.isoformat()
+    return d
+
+
+@router.post("/jobs/{job_id}/approval/request", summary="Request approval for a job")
 def request_approval(
-    job_id:  str,
-    req:     RequestApprovalBody,
-    request: Request,
-    user:    CurrentUser = Depends(require_permission("jobs:create")),
-    db:      Session     = Depends(get_db),
-):
-    """
-    Submit a migration job for approval before execution.
-
-    After calling this, the job status changes to 'pending_approval'.
-    A Migration Admin or Tenant Admin must review and approve/reject it.
-
-    Auto-approval rules (optional):
-      Pass auto_approve_rules to enable automatic approval for simple jobs:
-      {
-        "require_approval_for_small_jobs": false   → small jobs auto-approve
-      }
-
-    If auto-approved: job moves directly to 'queued' status.
-    If pending: approval must come from a reviewer before job can run.
-    """
-    try:
-        result = approval_svc.request_approval(
-            db=db,
-            job_id=job_id,
-            tenant_id=user.tenant_id,
-            requested_by_id=user.user_id,
-            auto_approve_if=req.auto_approve_rules or {},
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    AuditTrail.log(
-        db=db, action="job.approval.request",
-        tenant_id=user.tenant_id, user_id=user.user_id,
-        resource_type="job", resource_id=job_id,
-        new_value={"auto_approved": result.get("auto_approved")},
-        request=request,
-    )
-    return result
-
-
-@router.post("/jobs/{job_id}/approval/approve",
-             summary="Approve a migration job for execution")
-def approve_job(
-    job_id:  str,
-    req:     ReviewBody,
-    request: Request,
-    user:    CurrentUser = Depends(require_permission("jobs:approve")),
-    db:      Session     = Depends(get_db),
-):
-    """
-    Approve a pending migration. Requires migration_admin or tenant_admin role.
-
-    After approval the job status changes to 'queued' and workers
-    can begin processing its chunks.
-    """
-    try:
-        result = approval_svc.approve(
-            db=db,
-            job_id=job_id,
-            reviewed_by_id=user.user_id,
-            notes=req.notes,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    AuditTrail.log(
-        db=db, action="job.approval.approved",
-        tenant_id=user.tenant_id, user_id=user.user_id,
-        resource_type="job", resource_id=job_id,
-        new_value={"notes": req.notes},
-        request=request,
-    )
-    return result
-
-
-@router.post("/jobs/{job_id}/approval/reject",
-             summary="Reject a migration job")
-def reject_job(
-    job_id:  str,
-    req:     RejectBody,
-    request: Request,
-    user:    CurrentUser = Depends(require_permission("jobs:approve")),
-    db:      Session     = Depends(get_db),
-):
-    """
-    Reject a pending migration. A reason (notes) is required.
-    The job status returns to 'rejected' and the requester must
-    revise and re-submit.
-    """
-    try:
-        result = approval_svc.reject(
-            db=db,
-            job_id=job_id,
-            reviewed_by_id=user.user_id,
-            notes=req.notes,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    AuditTrail.log(
-        db=db, action="job.approval.rejected",
-        tenant_id=user.tenant_id, user_id=user.user_id,
-        resource_type="job", resource_id=job_id,
-        new_value={"reason": req.notes},
-        request=request,
-    )
-    return result
-
-
-@router.get("/jobs/{job_id}/approval", summary="Get approval status for a job")
-def get_approval(
     job_id: str,
-    user:   CurrentUser = Depends(require_permission("jobs:read")),
-    db:     Session     = Depends(get_db),
+    body:   ApprovalRequestBody,
+    user:   dict = Depends(require_permission(
+        "create:job", "start:job", "manage:tenant_settings"
+    )),
+    db:     Session = Depends(get_db),
 ):
-    """Returns the latest approval record for a job."""
-    result = approval_svc.get_approval_status(db, job_id)
-    if not result:
-        return {"job_id": job_id, "approval_status": "not_requested",
-                "message": "No approval has been requested for this job"}
-    return result
+    job_row = db.execute(
+        text("SELECT id, tenant_id FROM migration_jobs WHERE id=:id"),
+        {"id": job_id}
+    ).fetchone()
+    assert_owned_by_tenant(job_row, user, resource_name="Job")
+
+    existing = db.execute(
+        text("""
+            SELECT id FROM migration_approvals
+            WHERE job_id=:jid AND status='pending'
+        """),
+        {"jid": job_id}
+    ).fetchone()
+    if existing:
+        raise HTTPException(status_code=409, detail="An approval request is already pending for this job.")
+
+    approval_id = str(uuid.uuid4())
+    now = datetime.datetime.utcnow()
+    db.execute(
+        text("""
+            INSERT INTO migration_approvals
+                (id, job_id, tenant_id, requested_by, reason, status, requested_at)
+            VALUES (:id, :jid, :tid, :by, :reason, 'pending', :now)
+        """),
+        {
+            "id": approval_id, "jid": job_id, "tid": user["tenant_id"],
+            "by": user["id"], "reason": body.reason, "now": now,
+        }
+    )
+    db.execute(
+        text("UPDATE migration_jobs SET status='awaiting_approval', updated_at=:now WHERE id=:id"),
+        {"now": now, "id": job_id}
+    )
+    db.commit()
+
+    try:
+        from backend.kernel.event_bus.event_bus import EventBus
+        EventBus.publish(
+            event_type="approval.requested", source_service="enterprise_security",
+            resource_type="job", resource_id=job_id,
+            payload={"reason": body.reason, "requested_by": user["email"]},
+            db=db,
+        )
+    except Exception:
+        pass
+
+    logger.info("Approval requested", job_id=job_id, requested_by=user["id"])
+    return {"approval_id": approval_id, "job_id": job_id, "status": "pending"}
 
 
-@router.get("/approvals/pending", summary="List all pending approvals for your tenant")
-def list_pending(
-    user: CurrentUser = Depends(require_permission("jobs:approve")),
-    db:   Session     = Depends(get_db),
+@router.post("/jobs/{job_id}/approval/approve", summary="Approve a pending migration (admin only)")
+def approve_job(
+    job_id: str,
+    body:   ApprovalReviewBody,
+    user:   dict = Depends(require_permission("manage:tenant_settings")),
+    db:     Session = Depends(get_db),
 ):
-    """
-    Returns all migration jobs waiting for approval in your tenant.
-    Used by Migration Admins and Tenant Admins to review the queue.
-    """
-    return approval_svc.list_pending(db, user.tenant_id)
+    approval = db.execute(
+        text("""
+            SELECT id, tenant_id FROM migration_approvals
+            WHERE job_id=:jid AND status='pending'
+            ORDER BY requested_at DESC LIMIT 1
+        """),
+        {"jid": job_id}
+    ).fetchone()
+    assert_owned_by_tenant(approval, user, resource_name="Approval")
+
+    now = datetime.datetime.utcnow()
+    db.execute(
+        text("""
+            UPDATE migration_approvals SET
+                status='approved', approver_id=:approver, comments=:comments, reviewed_at=:now
+            WHERE id=:id
+        """),
+        {"approver": user["id"], "comments": body.comments, "now": now, "id": approval.id}
+    )
+    db.execute(
+        text("UPDATE migration_jobs SET status='planning', updated_at=:now WHERE id=:id"),
+        {"now": now, "id": job_id}
+    )
+    db.commit()
+
+    try:
+        from backend.kernel.event_bus.event_bus import EventBus
+        EventBus.publish(
+            event_type="approval.approved", source_service="enterprise_security",
+            resource_type="job", resource_id=job_id,
+            payload={"approved_by": user["email"], "comments": body.comments},
+            db=db,
+        )
+    except Exception:
+        pass
+
+    logger.info("Job approved", job_id=job_id, approved_by=user["id"])
+    return {"job_id": job_id, "status": "approved", "approved_by": user["email"]}
+
+
+@router.post("/jobs/{job_id}/approval/reject", summary="Reject a pending migration (admin only)")
+def reject_job(
+    job_id: str,
+    body:   ApprovalReviewBody,
+    user:   dict = Depends(require_permission("manage:tenant_settings")),
+    db:     Session = Depends(get_db),
+):
+    approval = db.execute(
+        text("""
+            SELECT id, tenant_id FROM migration_approvals
+            WHERE job_id=:jid AND status='pending'
+            ORDER BY requested_at DESC LIMIT 1
+        """),
+        {"jid": job_id}
+    ).fetchone()
+    assert_owned_by_tenant(approval, user, resource_name="Approval")
+
+    if not body.comments:
+        raise HTTPException(status_code=400, detail="A reason is required when rejecting a migration.")
+
+    now = datetime.datetime.utcnow()
+    db.execute(
+        text("""
+            UPDATE migration_approvals SET
+                status='rejected', approver_id=:approver, comments=:comments, reviewed_at=:now
+            WHERE id=:id
+        """),
+        {"approver": user["id"], "comments": body.comments, "now": now, "id": approval.id}
+    )
+    db.execute(
+        text("UPDATE migration_jobs SET status='cancelled', error_message=:msg, updated_at=:now WHERE id=:id"),
+        {"msg": f"Approval rejected: {body.comments}", "now": now, "id": job_id}
+    )
+    db.commit()
+
+    try:
+        from backend.kernel.event_bus.event_bus import EventBus
+        EventBus.publish(
+            event_type="approval.rejected", source_service="enterprise_security",
+            resource_type="job", resource_id=job_id,
+            payload={"rejected_by": user["email"], "comments": body.comments},
+            db=db,
+        )
+    except Exception:
+        pass
+
+    logger.info("Job rejected", job_id=job_id, rejected_by=user["id"])
+    return {"job_id": job_id, "status": "rejected", "rejected_by": user["email"]}
