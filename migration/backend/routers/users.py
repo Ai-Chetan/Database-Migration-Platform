@@ -1,16 +1,10 @@
 """
-Users Router
+Users Router (SCHEMA-ADAPTED VERSION)
 File: migration/backend/routers/users.py
 
-Endpoints:
-    GET    /users                       -> list users (admin only)
-    POST   /users                       -> create user (admin only)
-    GET    /users/{id}                  -> get one user
-    PUT    /users/{id}                  -> update user
-    DELETE /users/{id}                  -> deactivate user (soft delete)
-    POST   /users/{id}/reset-password   -> admin resets a user's password
-    POST   /users/{id}/activate         -> reactivate a deactivated user
-    GET    /roles                       -> list all roles with permissions
+REPLACES the version from the earlier auth batch. Adapted to your existing
+users table: uses 'full_name' instead of 'name', and tenant_id is UUID
+(cast to str() for comparison against the JWT's string tenant_id claim).
 """
 
 import datetime
@@ -20,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel, EmailStr
-from typing import Optional, List
+from typing import Optional
 
 from backend.shared.config.database import get_db
 from backend.shared.auth.auth_service import AuthService, AuthError
@@ -82,16 +76,18 @@ def _check_role_assignable(caller_role: str, target_role: str) -> None:
 def _row_to_user(row) -> dict:
     d = dict(row._mapping)
     d["id"] = str(d["id"])
+    if d.get("tenant_id"):
+        d["tenant_id"] = str(d["tenant_id"])
     if d.get("created_by"):
         d["created_by"] = str(d["created_by"])
+    if "full_name" in d:
+        d["name"] = d.pop("full_name") or ""
     for k in ("last_login", "created_at", "updated_at", "locked_until"):
         if d.get(k):
             d[k] = d[k].isoformat()
     d.pop("password_hash", None)
     return d
 
-
-router_get_users_summary = "List all users in the tenant"
 
 @router.get("/users", summary="List all users in the tenant")
 def list_users(
@@ -101,7 +97,7 @@ def list_users(
     user:      dict = Depends(require_permission("manage:users")),
     db:        Session = Depends(get_db),
 ):
-    conditions = ["tenant_id = :tid"]
+    conditions = ["tenant_id::text = :tid"]
     params = {"tid": user["tenant_id"]}
 
     if role:
@@ -111,12 +107,12 @@ def list_users(
         conditions.append("is_active = :active")
         params["active"] = is_active
     if search:
-        conditions.append("(LOWER(name) LIKE :search OR LOWER(email) LIKE :search)")
+        conditions.append("(LOWER(full_name) LIKE :search OR LOWER(email) LIKE :search)")
         params["search"] = f"%{search.lower()}%"
 
     rows = db.execute(
         text(f"""
-            SELECT id, tenant_id, email, name, role, is_active, force_password_change,
+            SELECT id, tenant_id, email, full_name, role, is_active, force_password_change,
                    last_login, failed_login_attempts, locked_until, created_at, updated_at
             FROM users
             WHERE {' AND '.join(conditions)}
@@ -143,7 +139,7 @@ def create_user(
     _check_role_assignable(user["role"], req.role)
 
     existing = db.execute(
-        text("SELECT id FROM users WHERE LOWER(email)=:email AND tenant_id=:tid"),
+        text("SELECT id FROM users WHERE LOWER(email)=:email AND tenant_id::text=:tid"),
         {"email": req.email.lower(), "tid": user["tenant_id"]}
     ).fetchone()
     if existing:
@@ -164,12 +160,12 @@ def create_user(
     row = db.execute(
         text("""
             INSERT INTO users
-                (id, tenant_id, email, name, password_hash, role, is_active,
+                (id, tenant_id, email, full_name, password_hash, role, is_active,
                  force_password_change, created_by, created_at, updated_at)
             VALUES
                 (gen_random_uuid(), :tid, :email, :name, :hash, :role, TRUE,
                  TRUE, :created_by, :now, :now)
-            RETURNING id, tenant_id, email, name, role, is_active,
+            RETURNING id, tenant_id, email, full_name, role, is_active,
                       force_password_change, created_at, updated_at
         """),
         {
@@ -183,8 +179,9 @@ def create_user(
     result = _row_to_user(row)
 
     if req.send_welcome_email:
-        logger.info("Welcome email would be sent here", email=req.email,
-                    temp_password_shown=generated_password is not None)
+        from backend.shared.auth.auth_email import send_welcome_email
+        send_welcome_email(db, to_email=req.email, name=req.name,
+                            temp_password=generated_password)
 
     logger.info("User created", email=req.email, role=req.role, created_by=user["id"])
 
@@ -203,9 +200,9 @@ def get_user(
 ):
     row = db.execute(
         text("""
-            SELECT id, tenant_id, email, name, role, is_active, force_password_change,
+            SELECT id, tenant_id, email, full_name, role, is_active, force_password_change,
                    last_login, failed_login_attempts, locked_until, created_at, updated_at
-            FROM users WHERE id=:id AND tenant_id=:tid
+            FROM users WHERE id=:id AND tenant_id::text=:tid
         """),
         {"id": user_id, "tid": user["tenant_id"]}
     ).fetchone()
@@ -222,7 +219,7 @@ def update_user(
     db:      Session = Depends(get_db),
 ):
     target = db.execute(
-        text("SELECT role FROM users WHERE id=:id AND tenant_id=:tid"),
+        text("SELECT role FROM users WHERE id=:id AND tenant_id::text=:tid"),
         {"id": user_id, "tid": user["tenant_id"]}
     ).fetchone()
     if not target:
@@ -239,7 +236,7 @@ def update_user(
     params: dict = {"now": datetime.datetime.utcnow(), "id": user_id}
 
     if req.name is not None:
-        set_parts.append("name=:name"); params["name"] = req.name
+        set_parts.append("full_name=:name"); params["name"] = req.name
     if req.role is not None:
         set_parts.append("role=:role"); params["role"] = req.role
     if req.is_active is not None:
@@ -253,7 +250,7 @@ def update_user(
 
     row = db.execute(
         text("""
-            SELECT id, tenant_id, email, name, role, is_active, force_password_change,
+            SELECT id, tenant_id, email, full_name, role, is_active, force_password_change,
                    last_login, created_at, updated_at
             FROM users WHERE id=:id
         """),
@@ -274,7 +271,7 @@ def deactivate_user(
         raise HTTPException(status_code=400, detail="You cannot deactivate your own account.")
 
     row = db.execute(
-        text("SELECT id FROM users WHERE id=:id AND tenant_id=:tid"),
+        text("SELECT id FROM users WHERE id=:id AND tenant_id::text=:tid"),
         {"id": user_id, "tid": user["tenant_id"]}
     ).fetchone()
     if not row:
@@ -298,7 +295,7 @@ def activate_user(
     db:      Session = Depends(get_db),
 ):
     row = db.execute(
-        text("SELECT id FROM users WHERE id=:id AND tenant_id=:tid"),
+        text("SELECT id FROM users WHERE id=:id AND tenant_id::text=:tid"),
         {"id": user_id, "tid": user["tenant_id"]}
     ).fetchone()
     if not row:
@@ -320,7 +317,7 @@ def reset_user_password(
     db:      Session = Depends(get_db),
 ):
     row = db.execute(
-        text("SELECT id FROM users WHERE id=:id AND tenant_id=:tid"),
+        text("SELECT id FROM users WHERE id=:id AND tenant_id::text=:tid"),
         {"id": user_id, "tid": user["tenant_id"]}
     ).fetchone()
     if not row:

@@ -1,24 +1,20 @@
 """
-Auth Service
+Auth Service (SCHEMA-ADAPTED VERSION)
 File: migration/backend/shared/auth/auth_service.py
 
-Core authentication logic: password hashing, JWT creation/verification,
-session management, login attempt throttling.
+REPLACES the version from the earlier auth batch. This version is adapted
+to match your EXISTING users/user_sessions table schema (discovered via
+diagnostic query), rather than assuming a fresh schema. Key differences
+from the original version:
 
-Uses:
-    bcrypt      → password hashing (via passlib)
-    python-jose → JWT encode/decode
+  - Reads/writes 'full_name' (existing column) instead of 'name'
+  - tenant_id is UUID (existing type) instead of VARCHAR — cast to str()
+    when embedding in JWT claims, since JWT claims are always strings/JSON
+  - Everything else (JWT creation, password hashing, lockout, sessions)
+    is unchanged from the original design
 
 Install:
     pip install "python-jose[cryptography]" "passlib[bcrypt]"
-
-Environment variables required:
-    JWT_SECRET          → long random string, generate with:
-                           python -c "import secrets; print(secrets.token_urlsafe(64))"
-    JWT_ALGORITHM        → default HS256
-    JWT_EXPIRE_HOURS     → default 24
-    MAX_LOGIN_ATTEMPTS   → default 5
-    LOCKOUT_MINUTES      → default 15
 """
 
 import os
@@ -68,7 +64,7 @@ class AuthError(Exception):
 
 class AuthService:
 
-    # ── Password hashing ──────────────────────────────────────────────────────
+    # -- Password hashing --------------------------------------------------
 
     @staticmethod
     def hash_password(plain_password: str) -> str:
@@ -87,7 +83,6 @@ class AuthService:
 
     @staticmethod
     def validate_password_strength(password: str) -> Optional[str]:
-        """Returns an error message if weak, None if acceptable."""
         if len(password) < 8:
             return "Password must be at least 8 characters long."
         if not any(c.isupper() for c in password):
@@ -96,13 +91,14 @@ class AuthService:
             return "Password must contain at least one number."
         return None
 
-    # ── JWT ────────────────────────────────────────────────────────────────────
+    # -- JWT -----------------------------------------------------------------
 
     @classmethod
     def create_access_token(cls, user: Dict[str, Any]) -> Dict[str, Any]:
         """
         Create a JWT for a user. Returns {token, jti, expires_at}.
-        Claims: sub (user id), email, role, tenant_id, jti (unique token id), exp
+        tenant_id in the DB is a UUID column — always cast to str() for the
+        JWT claim since JWT payloads must be JSON-serializable.
         """
         if jwt is None:
             raise RuntimeError("python-jose not installed. Run: pip install \"python-jose[cryptography]\"")
@@ -114,9 +110,9 @@ class AuthService:
         claims = {
             "sub":       str(user["id"]),
             "email":     user["email"],
-            "name":      user.get("name", ""),
+            "name":      user.get("full_name") or "",
             "role":      user["role"],
-            "tenant_id": user.get("tenant_id", "local"),
+            "tenant_id": str(user.get("tenant_id", "")),
             "jti":       jti,
             "iat":       now,
             "exp":       expires_at,
@@ -126,7 +122,6 @@ class AuthService:
 
     @classmethod
     def decode_token(cls, token: str) -> Dict[str, Any]:
-        """Decode and verify a JWT. Raises AuthError if invalid or expired."""
         if jwt is None:
             raise RuntimeError("python-jose not installed.")
         try:
@@ -135,7 +130,7 @@ class AuthService:
         except JWTError:
             raise AuthError("Invalid or expired session. Please sign in again.", 401)
 
-    # ── Login flow ─────────────────────────────────────────────────────────────
+    # -- Login flow ------------------------------------------------------------
 
     @classmethod
     def authenticate(
@@ -149,13 +144,12 @@ class AuthService:
         """
         Full login flow: verify credentials, check lockout, issue token, record session.
         Returns {access_token, token_type, user}.
-        Raises AuthError with a safe message on any failure.
         """
         email = email.strip().lower()
 
         row = db.execute(
             text("""
-                SELECT id, tenant_id, email, name, password_hash, role, is_active,
+                SELECT id, tenant_id, email, full_name, password_hash, role, is_active,
                        force_password_change, failed_login_attempts, locked_until
                 FROM users WHERE LOWER(email) = :email
             """),
@@ -163,12 +157,10 @@ class AuthService:
         ).fetchone()
 
         if not row:
-            # Do not reveal whether the email exists
             raise AuthError("Invalid email or password.", 401)
 
         user = dict(row._mapping)
 
-        # Check lockout
         locked_until = user.get("locked_until")
         if locked_until and locked_until > datetime.datetime.utcnow():
             minutes_left = int((locked_until - datetime.datetime.utcnow()).total_seconds() / 60) + 1
@@ -180,12 +172,10 @@ class AuthService:
         if not user["is_active"]:
             raise AuthError("This account has been deactivated. Contact your administrator.", 403)
 
-        # Verify password
         if not cls.verify_password(password, user["password_hash"]):
-            cls._record_failed_login(db, user["id"], user.get("failed_login_attempts", 0))
+            cls._record_failed_login(db, user["id"], user.get("failed_login_attempts") or 0)
             raise AuthError("Invalid email or password.", 401)
 
-        # Success — reset failed attempts, update last login
         db.execute(
             text("""
                 UPDATE users SET
@@ -196,18 +186,17 @@ class AuthService:
             {"now": datetime.datetime.utcnow(), "id": user["id"]}
         )
 
-        # Issue token
         token_data = cls.create_access_token(user)
 
-        # Record session
         db.execute(
             text("""
                 INSERT INTO user_sessions
-                    (id, user_id, token_jti, ip_address, user_agent, issued_at, expires_at)
-                VALUES (gen_random_uuid(), :uid, :jti, :ip, :ua, :now, :exp)
+                    (id, user_id, token_hash, token_jti, ip_address, user_agent,
+                     issued_at, expires_at, created_at)
+                VALUES (gen_random_uuid(), :uid, :thash, :jti, :ip, :ua, :now, :exp, :now)
             """),
             {
-                "uid": user["id"], "jti": token_data["jti"],
+                "uid": user["id"], "thash": token_data["jti"], "jti": token_data["jti"],
                 "ip": ip_address, "ua": user_agent,
                 "now": datetime.datetime.utcnow(), "exp": token_data["expires_at"],
             }
@@ -223,10 +212,10 @@ class AuthService:
             "user": {
                 "id":                    str(user["id"]),
                 "email":                 user["email"],
-                "name":                  user["name"],
+                "name":                  user.get("full_name") or "",
                 "role":                  user["role"],
-                "tenant_id":             user["tenant_id"],
-                "force_password_change": user["force_password_change"],
+                "tenant_id":             str(user.get("tenant_id", "")),
+                "force_password_change": bool(user.get("force_password_change")),
                 "permissions":           cls._get_permissions(db, user["role"]),
             },
         }
@@ -237,7 +226,7 @@ class AuthService:
         locked_until = None
         if new_attempts >= MAX_LOGIN_ATTEMPTS:
             locked_until = datetime.datetime.utcnow() + datetime.timedelta(minutes=LOCKOUT_MINUTES)
-            logger.warning("Account locked due to failed login attempts", user_id=user_id)
+            logger.warning("Account locked due to failed login attempts", user_id=str(user_id))
 
         db.execute(
             text("""
@@ -249,13 +238,13 @@ class AuthService:
         )
         db.commit()
 
-    # ── Logout / session revocation ───────────────────────────────────────────
+    # -- Logout / session revocation --------------------------------------------
 
     @classmethod
     def revoke_session(cls, db: Session, jti: str, reason: str = "logout") -> None:
         db.execute(
             text("""
-                UPDATE user_sessions SET revoked_at=:now, revoked_reason=:reason
+                UPDATE user_sessions SET revoked_at=:now, revoked_reason=:reason, is_revoked=TRUE
                 WHERE token_jti=:jti AND revoked_at IS NULL
             """),
             {"now": datetime.datetime.utcnow(), "reason": reason, "jti": jti}
@@ -266,7 +255,7 @@ class AuthService:
     def revoke_all_sessions(cls, db: Session, user_id: str, reason: str = "admin_revoked") -> int:
         result = db.execute(
             text("""
-                UPDATE user_sessions SET revoked_at=:now, revoked_reason=:reason
+                UPDATE user_sessions SET revoked_at=:now, revoked_reason=:reason, is_revoked=TRUE
                 WHERE user_id=:uid AND revoked_at IS NULL
             """),
             {"now": datetime.datetime.utcnow(), "reason": reason, "uid": user_id}
@@ -285,7 +274,7 @@ class AuthService:
         ).fetchone()
         return row is not None
 
-    # ── Password management ───────────────────────────────────────────────────
+    # -- Password management -----------------------------------------------------
 
     @classmethod
     def change_password(
@@ -313,9 +302,8 @@ class AuthService:
             {"h": new_hash, "now": datetime.datetime.utcnow(), "id": user_id}
         )
         db.commit()
-        # Revoke all other sessions for security
         cls.revoke_all_sessions(db, user_id, reason="password_changed")
-        logger.info("Password changed", user_id=user_id)
+        logger.info("Password changed", user_id=str(user_id))
 
     @classmethod
     def admin_reset_password(
@@ -337,9 +325,9 @@ class AuthService:
         )
         db.commit()
         cls.revoke_all_sessions(db, user_id, reason="password_reset_by_admin")
-        logger.info("Password reset by admin", user_id=user_id)
+        logger.info("Password reset by admin", user_id=str(user_id))
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
+    # -- Helpers ------------------------------------------------------------------
 
     @classmethod
     def _get_permissions(cls, db: Session, role: str) -> List[str]:
@@ -353,7 +341,7 @@ class AuthService:
     def get_user_by_id(cls, db: Session, user_id: str) -> Optional[Dict[str, Any]]:
         row = db.execute(
             text("""
-                SELECT id, tenant_id, email, name, role, is_active,
+                SELECT id, tenant_id, email, full_name, role, is_active,
                        force_password_change, last_login, created_at
                 FROM users WHERE id=:id
             """),
@@ -363,6 +351,8 @@ class AuthService:
             return None
         d = dict(row._mapping)
         d["id"] = str(d["id"])
+        d["tenant_id"] = str(d["tenant_id"]) if d.get("tenant_id") else ""
+        d["name"] = d.pop("full_name") or ""
         for k in ("last_login", "created_at"):
             if d.get(k):
                 d[k] = d[k].isoformat()
