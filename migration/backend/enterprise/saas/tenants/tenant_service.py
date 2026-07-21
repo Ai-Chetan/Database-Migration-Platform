@@ -2,6 +2,18 @@
 Tenant & User Management
 File: migration/backend/enterprise/saas/tenants/tenant_service.py
 
+BUG FIX APPLIED (this version):
+  Every query against the 'users' table referenced a column called
+  'status' (e.g. "WHERE status = 'active'", "SET status='inactive'").
+  Live database inspection confirmed this column does NOT exist on your
+  real users table — the actual column is 'is_active BOOLEAN'. This
+  caused login to fail with:
+      psycopg2.errors.UndefinedColumn: column "status" does not exist
+  Fixed 5 occurrences across create_user, get_user, get_user_by_email,
+  list_users, and deactivate_user — all now use is_active (boolean)
+  instead of status (nonexistent varchar). tenants.status (a different,
+  real column on the tenants table) was left untouched.
+
 Handles:
   - Tenant registration and management
   - User creation, invitation, and management
@@ -141,9 +153,9 @@ class TenantService:
         db.execute(
             text("""
                 INSERT INTO users
-                    (id, tenant_id, email, password_hash, full_name, role, status, created_at, updated_at)
+                    (id, tenant_id, email, password_hash, full_name, role, is_active, created_at, updated_at)
                 VALUES
-                    (:id, :tid, :email, :pwd, :name, :role, 'active', :now, :now)
+                    (:id, :tid, :email, :pwd, :name, :role, TRUE, :now, :now)
             """),
             {
                 "id": uid, "tid": tenant_id, "email": email,
@@ -156,7 +168,7 @@ class TenantService:
 
     def get_user(self, db: Session, user_id: str) -> Optional[dict]:
         row = db.execute(
-            text("SELECT id, tenant_id, email, full_name, role, status, last_login_at, created_at FROM users WHERE id = :id"),
+            text("SELECT id, tenant_id, email, full_name, role, is_active, last_login_at, created_at FROM users WHERE id = :id"),
             {"id": user_id}
         ).fetchone()
         return self._row(row) if row else None
@@ -164,7 +176,7 @@ class TenantService:
     def get_user_by_email(self, db: Session, email: str) -> Optional[dict]:
         """Returns user WITH password_hash (for login verification only)."""
         row = db.execute(
-            text("SELECT * FROM users WHERE email = :email AND status = 'active'"),
+            text("SELECT * FROM users WHERE email = :email AND is_active = TRUE"),
             {"email": email}
         ).fetchone()
         return self._row(row) if row else None
@@ -172,7 +184,7 @@ class TenantService:
     def list_users(self, db: Session, tenant_id: str) -> List[dict]:
         rows = db.execute(
             text("""
-                SELECT id, tenant_id, email, full_name, role, status, last_login_at, created_at
+                SELECT id, tenant_id, email, full_name, role, is_active, last_login_at, created_at
                 FROM users WHERE tenant_id = :tid ORDER BY created_at DESC
             """),
             {"tid": tenant_id}
@@ -200,7 +212,7 @@ class TenantService:
 
     def deactivate_user(self, db: Session, user_id: str) -> dict:
         db.execute(
-            text("UPDATE users SET status='inactive', updated_at=:now WHERE id=:id"),
+            text("UPDATE users SET is_active=FALSE, updated_at=:now WHERE id=:id"),
             {"now": datetime.datetime.utcnow(), "id": user_id}
         )
         db.commit()
