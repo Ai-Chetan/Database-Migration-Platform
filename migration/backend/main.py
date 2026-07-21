@@ -2,8 +2,24 @@
 Migration Platform Kernel — Unified Main Entry Point
 File: migration/backend/main.py
 
+CHANGES IN THIS VERSION (fixes applied):
+  1. Removed the duplicate auth/users router registration that appeared
+     twice at the bottom of the old file (lines 390-400 previously).
+  2. Removed the import of backend.routers.auth / backend.routers.users
+     entirely — that parallel auth system has been retired in favor of
+     the mature, already-complete enterprise/security/rbac/auth.py +
+     enterprise/routers/auth.py + TenantService system, which is what the
+     frontend was actually built against and what your live database
+     (users, tenants, roles, user_sessions tables) already matches.
+  3. Added RateLimitMiddleware, which existed on disk but was never wired
+     into the app. Now applied to /auth/login and password-reset endpoints.
+  4. RBACMiddleware import removed — it depended on the retired
+     shared/middleware/route_permissions.py and shared/auth/auth_service.py
+     files (also retired). Route-level protection is now handled the way
+     it always was in the OLD system: via Depends(require_permission(...))
+     inside each router, using enterprise/security/rbac/auth.py.
+
 Runs ALL platform services on port 8000.
-This replaces running 15 individual FastAPI services on separate ports.
 
 Start:
     cd migration/
@@ -22,7 +38,7 @@ Docs: http://localhost:8000/docs
 API sections available at port 8000:
     /jobs, /tables, /chunks, /connections    → Control Plane
     /projects, /schemas, /mappings           → Schema Mapping
-    /auth, /tenants, /users, /approvals      → Security + SaaS
+    /auth, /tenants, /approvals              → Security + SaaS (enterprise/routers)
     /plugins, /validators, /policies         → Plugin Service
     /catalog, /events, /services             → Kernel
     /workflows, /executions                  → Workflow Engine
@@ -42,7 +58,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.shared.middleware.route_permissions import RBACMiddleware
+from backend.shared.middleware.rate_limit import RateLimitMiddleware
 
 app = FastAPI(
     title="Migration Platform Kernel",
@@ -64,7 +80,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_middleware(RBACMiddleware)
+# Rate limiting on sensitive auth endpoints (login, password reset).
+# See shared/middleware/rate_limit.py for configuration via env vars
+# (RATE_LIMIT_LOGIN_MAX, RATE_LIMIT_LOGIN_WINDOW, etc.)
+app.add_middleware(RateLimitMiddleware)
+
+# NOTE: RBACMiddleware has been removed. Permission enforcement is handled
+# per-route via Depends(require_permission(...)) from
+# backend.enterprise.security.rbac.auth — the same pattern already used
+# throughout enterprise/routers/*.py. This matches how the OLD, retained
+# auth system was designed from the start.
+
 
 # ── Import and register all routers ───────────────────────────────────────────
 # Each import is wrapped in try/except so one missing module doesn't
@@ -103,7 +129,7 @@ try:
 except Exception as e:
     print(f"[WARN] Schema Mapping routers not loaded: {e}")
 
-# ── 3. Enterprise Security + SaaS ─────────────────────────────────────────────
+# ── 3. Enterprise Security + SaaS (CANONICAL auth system — kept) ─────────────
 try:
     from backend.enterprise.routers import auth, tenants, approvals, templates, audit, secrets
     app.include_router(auth.router)
@@ -223,7 +249,6 @@ def on_startup():
                 version="1.0.0",
                 metadata={"unified": True, "replaces_ports": list(range(8003, 8018))},
             )
-            # Update all service URLs to point to 8000
             from sqlalchemy import text
             db.execute(text("""
                 UPDATE service_registry
@@ -356,7 +381,16 @@ def health():
 
     maintenance = False
     try:
-        maintenance = bool(redis_client.exists("migration:maintenance:active"))
+        from backend.shared.config.database import SessionLocal
+        from sqlalchemy import text
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                text("SELECT is_active FROM maintenance_mode WHERE tenant_id IS NULL LIMIT 1")
+            ).fetchone()
+            maintenance = bool(row[0]) if row else False
+        finally:
+            db.close()
     except Exception:
         pass
 
@@ -385,16 +419,3 @@ def root():
         "docs":    "http://localhost:8000/docs",
         "health":  "http://localhost:8000/health",
     }
-
-
-from backend.routers import auth as auth_router
-from backend.routers import users as users_router
-
-app.include_router(auth_router.router)
-app.include_router(users_router.router)
-
-from backend.routers import auth as auth_router
-from backend.routers import users as users_router
-
-app.include_router(auth_router.router)
-app.include_router(users_router.router)
