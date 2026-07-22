@@ -2,6 +2,15 @@
 Invitation Service
 File: migration/backend/enterprise/saas/invitations/invitation_service.py
 
+BUG FIX APPLIED (this version):
+  accept_invitation()'s INSERT INTO users included a 'status' column
+  with literal 'active' — the same mistake found and fixed in
+  tenant_service.py. Live database inspection confirmed the real users
+  table has no 'status' column, only 'is_active BOOLEAN'. Fixed the one
+  occurrence to use is_active=TRUE instead. user_invitations.status (a
+  different, real column on the user_invitations table) was left
+  untouched — it does exist and is used correctly throughout this file.
+
 Handles user invitations to a tenant workspace.
 Flow:
   1. Admin calls POST /auth/invite with email + role
@@ -130,9 +139,9 @@ class InvitationService:
         db.execute(
             text("""
                 INSERT INTO users
-                    (id, tenant_id, email, password_hash, full_name, role, status, created_at, updated_at)
+                    (id, tenant_id, email, password_hash, full_name, role, is_active, created_at, updated_at)
                 VALUES
-                    (:id, :tid, :email, :pwd, :name, :role, 'active', :now, :now)
+                    (:id, :tid, :email, :pwd, :name, :role, TRUE, :now, :now)
             """),
             {
                 "id": uid, "tid": inv["tenant_id"], "email": inv["email"],
