@@ -2,17 +2,24 @@
 Tenant & User Management
 File: migration/backend/enterprise/saas/tenants/tenant_service.py
 
-BUG FIX APPLIED (this version):
-  Every query against the 'users' table referenced a column called
-  'status' (e.g. "WHERE status = 'active'", "SET status='inactive'").
-  Live database inspection confirmed this column does NOT exist on your
-  real users table — the actual column is 'is_active BOOLEAN'. This
-  caused login to fail with:
-      psycopg2.errors.UndefinedColumn: column "status" does not exist
-  Fixed 5 occurrences across create_user, get_user, get_user_by_email,
-  list_users, and deactivate_user — all now use is_active (boolean)
-  instead of status (nonexistent varchar). tenants.status (a different,
-  real column on the tenants table) was left untouched.
+BUG FIXES APPLIED (this version):
+  1. Every query against the 'users' table referenced a column called
+     'status' (e.g. "WHERE status = 'active'", "SET status='inactive'").
+     Live database inspection confirmed this column does NOT exist on
+     your real users table — the actual column is 'is_active BOOLEAN'.
+     This caused login to fail with:
+         psycopg2.errors.UndefinedColumn: column "status" does not exist
+     Fixed 5 occurrences across create_user, get_user, get_user_by_email,
+     list_users, and deactivate_user — all now use is_active (boolean)
+     instead of status (nonexistent varchar).
+
+  2. create_tenant()'s INSERT included an 'updated_at' column in its
+     column list, but the real 'tenants' table has no updated_at column
+     at all (confirmed via live database inspection — only created_at
+     exists on tenants). This would have thrown the same UndefinedColumn
+     error the first time anyone called POST /auth/register. Removed
+     updated_at from the tenants INSERT (tenants.status, a different,
+     real column, was left untouched — it does exist).
 
 Handles:
   - Tenant registration and management
@@ -62,11 +69,11 @@ class TenantService:
                 INSERT INTO tenants
                     (id, name, slug, status, plan_name,
                      max_users, max_jobs, max_connections, max_workers,
-                     billing_email, created_at, updated_at)
+                     billing_email, created_at)
                 VALUES
                     (:id, :name, :slug, 'active', :plan,
                      :mu, :mj, :mc, :mw,
-                     :email, :now, :now)
+                     :email, :now)
             """),
             {
                 "id": tid, "name": name, "slug": slug, "plan": plan_name,
