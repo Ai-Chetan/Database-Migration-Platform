@@ -52,7 +52,7 @@ def enforce_policies_or_raise(
 
     job_row = db.execute(
         text("""
-            SELECT id, tenant_id, status, mapping_project_id
+            SELECT id, tenant_id, status
             FROM migration_jobs WHERE id=:id
         """),
         {"id": job_id}
@@ -73,8 +73,12 @@ def enforce_policies_or_raise(
 
     approval_status = _get_latest_approval_status(db, job_id)
 
-    if dry_run_result is None and job_row.mapping_project_id:
-        dry_run_result = _load_latest_dry_run(db, job_row.mapping_project_id)
+    # NOTE: mapping_project_id does not exist on migration_jobs in the real
+    # schema (confirmed via live database inspection), so automatic dry-run
+    # lookup is not possible from the job record alone. If dry_run_result
+    # is not explicitly supplied by the caller, forbidden_lossy_conversion
+    # policy checks are skipped (PolicyRunner treats missing dry_run_result
+    # as "policy skipped", not as a failure — see policy_plugins.py).
 
     result = PolicyRunner.check_all(
         db=db,
@@ -108,24 +112,3 @@ def _get_latest_approval_status(db: Session, job_id: str) -> Optional[str]:
         {"jid": job_id}
     ).fetchone()
     return row[0] if row else None
-
-
-def _load_latest_dry_run(db: Session, mapping_project_id: str) -> Optional[Dict[str, Any]]:
-    try:
-        row = db.execute(
-            text("""
-                SELECT unsafe_conversions, lossy_conversions, warnings
-                FROM schema_dry_run_results
-                WHERE project_id=:pid ORDER BY created_at DESC LIMIT 1
-            """),
-            {"pid": mapping_project_id}
-        ).fetchone()
-        if not row:
-            return None
-        return {
-            "unsafe_conversions": row[0] or [],
-            "lossy_conversions":  row[1] or [],
-            "warnings":           row[2] or [],
-        }
-    except Exception:
-        return None
