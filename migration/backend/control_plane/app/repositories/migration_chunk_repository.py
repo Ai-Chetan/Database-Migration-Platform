@@ -39,10 +39,10 @@ class MigrationChunkRepository:
         return chunk
 
     def get_pending_chunks(self, db: Session, job_id: str) -> List[MigrationChunk]:
-        return db.query(MigrationChunk).filter(MigrationChunk.job_id == job_id, MigrationChunk.status == "PENDING").all()
+        return db.query(MigrationChunk).filter(MigrationChunk.job_id == job_id, MigrationChunk.status == "pending").all()
 
     def get_running_chunks(self, db: Session) -> List[MigrationChunk]:
-        return db.query(MigrationChunk).filter(MigrationChunk.status == "RUNNING").all()
+        return db.query(MigrationChunk).filter(MigrationChunk.status == "running").all()
 
     def get_failed_chunks(self, db: Session) -> List[MigrationChunk]:
-        return db.query(MigrationChunk).filter(MigrationChunk.status == "FAILED").all()
+        return db.query(MigrationChunk).filter(MigrationChunk.status == "failed").all()
