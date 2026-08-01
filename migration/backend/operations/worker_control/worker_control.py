@@ -22,6 +22,44 @@ All actions:
 Redis key conventions:
     migration:worker:{worker_id}:cmd  → "pause" | "kill" | "drain"
     migration:job:{job_id}:worker_count → target worker count override
+
+CHANGES IN THIS VERSION (Stage 1 schema audit fix):
+  This file assumed a worker_heartbeats schema that doesn't match the real
+  database. Confirmed real columns (via live schema inspection):
+      worker_heartbeats: id, worker_name, worker_status, current_chunk_id,
+                          hostname, cpu_usage, memory_usage, last_heartbeat,
+                          created_at
+  It does NOT have worker_id, status, current_job_id, host, pid, or
+  error_message — all of which the old version of this file queried
+  directly, meaning every method here would have failed at runtime with a
+  Postgres "column does not exist" error the first time it actually ran.
+
+  Fixes applied:
+    - worker_id      → worker_name (the real identifying column; the
+                        "worker_id" concept from Redis keys / the frontend
+                        is really this column's value, just renamed)
+    - status          → worker_status
+    - host            → hostname
+    - current_job_id  → does not exist as a column. A worker's current job
+                        is now derived by joining through
+                        migration_chunks (worker_heartbeats.current_chunk_id
+                        -> migration_chunks.id -> migration_chunks.job_id).
+    - pid             → does not exist anywhere in the real schema. Dropped
+                        from all responses (Stage 2 note: would need a
+                        migration to add this column if it's needed later).
+    - error_message   → does not exist on worker_heartbeats. Quarantine
+                        reasons are now recorded only in operations_actions
+                        (which already has a `reason` text column) instead
+                        of silently failing to write to a nonexistent
+                        column.
+
+  Also fixed: operations_actions.tenant_id and .operator_id are UUID
+  columns, but this file's defaults were plain strings ("local",
+  "operator") which would fail a Postgres UUID cast. _log_action() now
+  accepts real UUIDs (or None) and passes NULL when a valid UUID isn't
+  available, instead of a string that would crash the INSERT (previously
+  masked by a silent except/rollback in _log_action, so it *looked* like
+  ops actions weren't being logged — they were fatally failing on every call).
 """
 
 import datetime
@@ -33,6 +71,18 @@ from sqlalchemy import text
 
 from backend.shared.config.redis import redis_client
 from backend.shared.config.logging import logger
+
+
+def _as_uuid_or_none(value):
+    """operations_actions.tenant_id / .operator_id are UUID columns.
+    Coerce a string to UUID if possible, otherwise return None so the
+    INSERT still succeeds (NULL is allowed on both columns)."""
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 class WorkerControl:
@@ -57,13 +107,13 @@ class WorkerControl:
         redis_client.setex(f"migration:worker:{worker_id}:cmd", self.CMD_TTL, "pause")
 
         db.execute(
-            text("UPDATE worker_heartbeats SET status='PAUSING' WHERE worker_id=:wid"),
+            text("UPDATE worker_heartbeats SET worker_status='PAUSING' WHERE worker_name=:wid"),
             {"wid": worker_id}
         )
         db.commit()
 
         self._log_action(db, "pause_worker", "worker", worker_id,
-                         before, {"status": "PAUSING"}, reason, operator, tenant_id)
+                         before, {"worker_status": "PAUSING"}, reason, operator, tenant_id)
 
         self._publish("worker.paused", worker_id, {"reason": reason})
 
@@ -84,13 +134,13 @@ class WorkerControl:
         redis_client.delete(f"migration:worker:{worker_id}:cmd")
 
         db.execute(
-            text("UPDATE worker_heartbeats SET status='IDLE' WHERE worker_id=:wid"),
+            text("UPDATE worker_heartbeats SET worker_status='IDLE' WHERE worker_name=:wid"),
             {"wid": worker_id}
         )
         db.commit()
 
         self._log_action(db, "resume_worker", "worker", worker_id,
-                         before, {"status": "IDLE"}, reason, operator, tenant_id)
+                         before, {"worker_status": "IDLE"}, reason, operator, tenant_id)
         self._publish("worker.resumed", worker_id, {"reason": reason})
 
         logger.info("Worker resumed", worker_id=worker_id)
@@ -113,13 +163,13 @@ class WorkerControl:
         redis_client.setex(f"migration:worker:{worker_id}:cmd", self.CMD_TTL, "kill")
 
         db.execute(
-            text("UPDATE worker_heartbeats SET status='STOPPING' WHERE worker_id=:wid"),
+            text("UPDATE worker_heartbeats SET worker_status='STOPPING' WHERE worker_name=:wid"),
             {"wid": worker_id}
         )
         db.commit()
 
         self._log_action(db, "kill_worker", "worker", worker_id,
-                         before, {"status": "STOPPING"}, reason, operator, tenant_id)
+                         before, {"worker_status": "STOPPING"}, reason, operator, tenant_id)
         self._publish("worker.stopped", worker_id, {"reason": reason, "forced": True})
 
         logger.warning("Worker kill signaled", worker_id=worker_id, reason=reason)
@@ -144,18 +194,15 @@ class WorkerControl:
                            86400, reason or "quarantined by operator")
 
         db.execute(
-            text("""
-                UPDATE worker_heartbeats
-                SET status='QUARANTINED',
-                    error_message=:msg
-                WHERE worker_id=:wid
-            """),
-            {"msg": f"QUARANTINED: {reason}", "wid": worker_id}
+            text("UPDATE worker_heartbeats SET worker_status='QUARANTINED' WHERE worker_name=:wid"),
+            {"wid": worker_id}
         )
         db.commit()
 
+        # worker_heartbeats has no error_message column, so the reason is
+        # recorded in operations_actions (which does have one) instead.
         self._log_action(db, "quarantine_worker", "worker", worker_id,
-                         {}, {"status": "QUARANTINED", "reason": reason},
+                         {}, {"worker_status": "QUARANTINED", "reason": reason},
                          reason, operator, tenant_id)
 
         logger.warning("Worker quarantined", worker_id=worker_id, reason=reason)
@@ -244,20 +291,34 @@ class WorkerControl:
         }
 
     def list_workers(self, db: Session, job_id: Optional[str] = None) -> List[Dict]:
-        """List all workers with their current status."""
+        """List all workers with their current status.
+
+        current_job_id is derived by joining through migration_chunks,
+        since worker_heartbeats itself has no such column - only
+        current_chunk_id, which points at a specific chunk (which in turn
+        belongs to a job).
+        """
         params: Dict[str, Any] = {}
         where  = ""
         if job_id:
-            where = "WHERE current_job_id=:jid"
+            where = "WHERE mc.job_id = :jid"
             params["jid"] = job_id
 
         rows = db.execute(
             text(f"""
-                SELECT worker_id, status, current_job_id, current_chunk_id,
-                       last_heartbeat, host, pid, error_message
-                FROM worker_heartbeats
+                SELECT
+                    wh.worker_name,
+                    wh.worker_status,
+                    mc.job_id            AS current_job_id,
+                    wh.current_chunk_id,
+                    wh.last_heartbeat,
+                    wh.hostname,
+                    wh.cpu_usage,
+                    wh.memory_usage
+                FROM worker_heartbeats wh
+                LEFT JOIN migration_chunks mc ON mc.id = wh.current_chunk_id
                 {where}
-                ORDER BY last_heartbeat DESC
+                ORDER BY wh.last_heartbeat DESC
             """),
             params
         ).fetchall()
@@ -268,12 +329,21 @@ class WorkerControl:
             for k, v in d.items():
                 if hasattr(v, "hex"):        d[k] = str(v)
                 if hasattr(v, "isoformat"):  d[k] = v.isoformat()
+            # Frontend-facing aliases: the frontend's Worker type predates this
+            # schema audit and expects worker_id/status/host. Real DB columns
+            # are worker_name/worker_status/hostname - keep both so neither
+            # side has to change right now. There is no `pid` column anywhere
+            # in the real schema, so it's intentionally omitted (frontend
+            # treats it as optional).
+            d["worker_id"] = d["worker_name"]
+            d["status"]    = d["worker_status"]
+            d["host"]      = d.get("hostname")
             # Add Redis command if any
-            cmd_key = f"migration:worker:{d['worker_id']}:cmd"
+            cmd_key = f"migration:worker:{d['worker_name']}:cmd"
             pending_cmd = redis_client.get(cmd_key)
             d["pending_command"] = pending_cmd.decode() if pending_cmd else None
             d["is_quarantined"]  = bool(
-                redis_client.exists(f"migration:worker:{d['worker_id']}:quarantined")
+                redis_client.exists(f"migration:worker:{d['worker_name']}:quarantined")
             )
             result.append(d)
         return result
@@ -282,7 +352,12 @@ class WorkerControl:
 
     def _get_worker_state(self, db: Session, worker_id: str) -> Dict:
         row = db.execute(
-            text("SELECT status, current_job_id, current_chunk_id FROM worker_heartbeats WHERE worker_id=:wid"),
+            text("""
+                SELECT wh.worker_status, mc.job_id AS current_job_id, wh.current_chunk_id
+                FROM worker_heartbeats wh
+                LEFT JOIN migration_chunks mc ON mc.id = wh.current_chunk_id
+                WHERE wh.worker_name = :wid
+            """),
             {"wid": worker_id}
         ).fetchone()
         return dict(row._mapping) if row else {}
@@ -290,9 +365,10 @@ class WorkerControl:
     def _get_active_worker_count(self, db: Session, job_id: str) -> int:
         row = db.execute(
             text("""
-                SELECT COUNT(*) FROM worker_heartbeats
-                WHERE current_job_id=:jid AND status IN ('BUSY','IDLE')
-                AND last_heartbeat > NOW() - INTERVAL '2 minutes'
+                SELECT COUNT(*) FROM worker_heartbeats wh
+                JOIN migration_chunks mc ON mc.id = wh.current_chunk_id
+                WHERE mc.job_id = :jid AND wh.worker_status IN ('BUSY','IDLE')
+                AND wh.last_heartbeat > NOW() - INTERVAL '2 minutes'
             """),
             {"jid": job_id}
         ).fetchone()
@@ -301,9 +377,10 @@ class WorkerControl:
     def _get_job_workers(self, db: Session, job_id: str) -> List[str]:
         rows = db.execute(
             text("""
-                SELECT worker_id FROM worker_heartbeats
-                WHERE current_job_id=:jid AND status IN ('BUSY','IDLE')
-                AND last_heartbeat > NOW() - INTERVAL '2 minutes'
+                SELECT wh.worker_name FROM worker_heartbeats wh
+                JOIN migration_chunks mc ON mc.id = wh.current_chunk_id
+                WHERE mc.job_id = :jid AND wh.worker_status IN ('BUSY','IDLE')
+                AND wh.last_heartbeat > NOW() - INTERVAL '2 minutes'
             """),
             {"jid": job_id}
         ).fetchall()
@@ -322,7 +399,8 @@ class WorkerControl:
                          :rid, :before::jsonb, :after::jsonb, :reason, :now)
                 """),
                 {
-                    "tid":    tenant_id, "op":     operator,
+                    "tid":    _as_uuid_or_none(tenant_id),
+                    "op":     _as_uuid_or_none(operator),
                     "atype":  action_type, "rtype": resource_type,
                     "rid":    resource_id,
                     "before": json.dumps(before, default=str),

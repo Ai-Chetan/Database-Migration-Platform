@@ -11,8 +11,10 @@ Endpoints:
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.migration_generator.script_generator import (
     generate_python_script, generate_sql_script, generate_airflow_dag
 )
@@ -23,11 +25,21 @@ router = APIRouter(tags=["Script Generation"])
 repo   = MappingRepository()
 
 
+def _owned_project(db: Session, project_id: str, user: CurrentUser) -> dict:
+    project = repo.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    if not user.can("*") and project.get("tenant_id") != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return project
+
+
 @router.post("/projects/{project_id}/scripts/generate", summary="Generate migration script")
 def generate_script(
     project_id: str,
     req: GenerateScriptRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
 ):
     """
     Generate a migration script for a specific table.
@@ -45,9 +57,7 @@ def generate_script(
     source_config and target_config are optional — if not provided,
     the service pulls them from the schema versions linked to the project.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])
@@ -157,21 +167,32 @@ def generate_script(
 
 
 @router.get("/projects/{project_id}/scripts", summary="List generated scripts for a project")
-def list_scripts(project_id: str, db: Session = Depends(get_db)):
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+def list_scripts(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
+    _owned_project(db, project_id, user)
     return repo.list_scripts(db, project_id)
 
 
 @router.get("/scripts/{script_id}/download", response_class=PlainTextResponse,
             summary="Download script content as plain text")
-def download_script(script_id: str, db: Session = Depends(get_db)):
+def download_script(
+    script_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Returns the full script content as plain text.
     Use this to download and save the generated .py or .sql file.
     """
-    content = repo.get_script_content(db, script_id)
-    if content is None:
+    row = db.execute(
+        text("SELECT project_id, content FROM generated_scripts WHERE id=:id"),
+        {"id": script_id}
+    ).fetchone()
+    if not row:
         raise HTTPException(status_code=404, detail=f"Script {script_id} not found")
+    project_id, content = row[0], row[1]
+    _owned_project(db, str(project_id), user)   # 404s if not caller's tenant
     return content

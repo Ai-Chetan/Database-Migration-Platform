@@ -11,6 +11,27 @@ identical. This is exactly the design goal: the Workflow Engine replaces
 the execution kernel with zero changes to worker orchestration logic.
 
 Worker states (unchanged): IDLE → BUSY → STOPPING → OFFLINE
+
+CHANGES IN THIS VERSION (Stage 1 schema audit fix):
+  This file previously had its OWN inline heartbeat/registration code
+  (_register_worker, _start_heartbeat, _heartbeat_loop, _update_status)
+  that wrote to worker_heartbeats using columns that don't exist at all
+  in the real schema (worker_id, status, registered_at, host, pid — none
+  of these are real columns; the actual columns are worker_name,
+  worker_status, hostname, cpu_usage, memory_usage). Every one of those
+  writes was wrapped in a bare try/except that silently swallowed the
+  resulting "column does not exist" error, so the worker would run and
+  process chunks correctly, but would NEVER successfully appear in
+  worker_heartbeats — meaning the Operations Console's worker list would
+  never show it, regardless of how much data it actually migrated.
+
+  Meanwhile, a second, entirely separate and already-CORRECT
+  implementation sat unused right next to it:
+  worker_service/app/monitoring/heartbeat.py's HeartbeatManager, which
+  uses the real column names. This was a Pattern-4 duplicate (two
+  systems built for the same purpose) where the working one was already
+  written but never actually wired up. Fixed by deleting the broken
+  inline heartbeat code and using HeartbeatManager instead.
 """
 
 import os
@@ -18,21 +39,19 @@ import json
 import time
 import signal
 import threading
-import datetime
 import uuid
-from sqlalchemy.orm import Session
 
 from backend.shared.config.database import SessionLocal
 from backend.shared.config.redis import redis_client
 from backend.shared.config.logging import logger
 from backend.shared.constants.queues import Queues
+from backend.worker_service.app.monitoring.heartbeat import HeartbeatManager
 
 # ── THE KEY CHANGE: import WorkflowExecutor instead of ChunkExecutor ──────────
 from backend.workflow_engine.executor.workflow_executor import WorkflowExecutor
 
 
 WORKER_ID          = os.environ.get("WORKER_ID", f"worker-{uuid.uuid4().hex[:8]}")
-HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "10"))
 QUEUE_TIMEOUT      = int(os.environ.get("QUEUE_TIMEOUT", "5"))
 TENANT_ID          = os.environ.get("TENANT_ID", "local")
 
@@ -44,7 +63,7 @@ class Worker:
         self.running   = True
         self.busy      = False
         self.executor  = WorkflowExecutor(worker_id=self.worker_id)   # ← was ChunkExecutor
-        self._heartbeat_thread: threading.Thread = None
+        self.heartbeat = HeartbeatManager(worker_id=self.worker_id)
 
         # Graceful shutdown on SIGTERM/SIGINT
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -52,16 +71,14 @@ class Worker:
 
     def start(self):
         logger.info("Worker starting", worker_id=self.worker_id)
-        self._register_worker()
-        self._start_heartbeat()
+        self.heartbeat.start()   # writes STARTING then IDLE, starts background loop
 
         logger.info("Worker ready — listening for chunks", worker_id=self.worker_id)
 
         while self.running:
-            self._update_status("IDLE")
+            self.heartbeat.set_idle()
 
             # ── Check throttle (Resource Governor may have set this) ──────
-            throttle_key     = f"migration:throttle:*"
             allowed_workers  = self._check_throttle()
             if not allowed_workers:
                 time.sleep(QUEUE_TIMEOUT)
@@ -98,7 +115,7 @@ class Worker:
                 continue
 
             self.busy = True
-            self._update_status("BUSY")
+            self.heartbeat.set_busy(chunk_id)
 
             db = SessionLocal()
             try:
@@ -119,7 +136,7 @@ class Worker:
                 db.close()
                 self.busy = False
 
-        self._update_status("OFFLINE")
+        self.heartbeat.stop()   # writes STOPPING, joins background thread, writes OFFLINE
         logger.info("Worker stopped", worker_id=self.worker_id)
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
@@ -128,76 +145,8 @@ class Worker:
         logger.info("Shutdown signal received, finishing current chunk...",
                     worker_id=self.worker_id)
         self.running = False
-        self._update_status("STOPPING")
 
-    # ── Registration and heartbeat ────────────────────────────────────────────
-
-    def _register_worker(self):
-        db = SessionLocal()
-        try:
-            from sqlalchemy import text
-            db.execute(
-                text("""
-                    INSERT INTO worker_heartbeats
-                        (worker_id, status, last_heartbeat, registered_at, host, pid)
-                    VALUES (:wid, 'IDLE', :now, :now, :host, :pid)
-                    ON CONFLICT (worker_id)
-                    DO UPDATE SET status='IDLE', last_heartbeat=:now
-                """),
-                {
-                    "wid":  self.worker_id,
-                    "now":  datetime.datetime.utcnow(),
-                    "host": os.environ.get("HOSTNAME", "localhost"),
-                    "pid":  os.getpid(),
-                }
-            )
-            db.commit()
-        except Exception as e:
-            logger.warning("Worker registration failed", error=str(e))
-        finally:
-            db.close()
-
-    def _start_heartbeat(self):
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, daemon=True, name="worker-heartbeat"
-        )
-        self._heartbeat_thread.start()
-
-    def _heartbeat_loop(self):
-        while self.running:
-            time.sleep(HEARTBEAT_INTERVAL)
-            try:
-                db = SessionLocal()
-                from sqlalchemy import text
-                db.execute(
-                    text("""
-                        UPDATE worker_heartbeats
-                        SET last_heartbeat=:now, status=:status
-                        WHERE worker_id=:wid
-                    """),
-                    {
-                        "now":    datetime.datetime.utcnow(),
-                        "status": "BUSY" if self.busy else "IDLE",
-                        "wid":    self.worker_id,
-                    }
-                )
-                db.commit()
-                db.close()
-            except Exception as e:
-                logger.warning("Heartbeat failed", error=str(e))
-
-    def _update_status(self, status: str):
-        try:
-            db = SessionLocal()
-            from sqlalchemy import text
-            db.execute(
-                text("UPDATE worker_heartbeats SET status=:s, last_heartbeat=:now WHERE worker_id=:wid"),
-                {"s": status, "now": datetime.datetime.utcnow(), "wid": self.worker_id}
-            )
-            db.commit()
-            db.close()
-        except Exception:
-            pass
+    # ── Throttle check ───────────────────────────────────────────────────────
 
     def _check_throttle(self) -> bool:
         """

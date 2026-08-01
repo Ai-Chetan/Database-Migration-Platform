@@ -36,7 +36,6 @@ class SimulateRequest(BaseModel):
     network_bandwidth_mbps: Optional[float] = None
     table_names:            Optional[List[str]] = None
     manual_tables:          Optional[List[Dict[str, Any]]] = None
-    tenant_id:              str = "local"
 
 
 class ScenarioItem(BaseModel):
@@ -51,7 +50,6 @@ class CompareRequest(BaseModel):
     connection_id:  str
     source_engine:  str = "mysql"
     target_engine:  str = "mysql"
-    tenant_id:      str = "local"
     scenarios:      List[ScenarioItem]
 
 
@@ -61,14 +59,17 @@ class WorkerSweepRequest(BaseModel):
     target_engine:          str = "mysql"
     chunk_size_strategy:    str = "size_based"
     network_bandwidth_mbps: Optional[float] = None
-    tenant_id:              str = "local"
     worker_counts:          Optional[List[int]] = None   # None = [2,4,8,16,32]
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @router.post("", summary="Run a migration simulation")
-def run_simulation(req: SimulateRequest, db: Session = Depends(get_db)):
+def run_simulation(
+    req: SimulateRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Projects what a migration will look like BEFORE touching production.
 
@@ -133,14 +134,18 @@ def run_simulation(req: SimulateRequest, db: Session = Depends(get_db)):
         network_bandwidth_mbps=req.network_bandwidth_mbps,
         table_names=req.table_names,
         manual_tables=req.manual_tables,
-        tenant_id=req.tenant_id,
+        tenant_id=user.tenant_id,
         name=req.name,
     )
     return result.to_dict()
 
 
 @router.post("/compare", summary="Compare multiple migration scenarios side by side")
-def compare_scenarios(req: CompareRequest, db: Session = Depends(get_db)):
+def compare_scenarios(
+    req: CompareRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Run multiple what-if scenarios and compare them.
     Results are sorted fastest-first.
@@ -181,12 +186,16 @@ def compare_scenarios(req: CompareRequest, db: Session = Depends(get_db)):
         scenarios=[s.dict() for s in req.scenarios],
         source_engine=req.source_engine,
         target_engine=req.target_engine,
-        tenant_id=req.tenant_id,
+        tenant_id=user.tenant_id,
     )
 
 
 @router.post("/worker-sweep", summary="Sweep worker counts to find optimal configuration")
-def worker_sweep(req: WorkerSweepRequest, db: Session = Depends(get_db)):
+def worker_sweep(
+    req: WorkerSweepRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Automatically simulates across a range of worker counts and returns
     a comparison showing ETA, CPU, and failure probability at each level.
@@ -234,7 +243,7 @@ def worker_sweep(req: WorkerSweepRequest, db: Session = Depends(get_db)):
         scenarios=scenarios,
         source_engine=req.source_engine,
         target_engine=req.target_engine,
-        tenant_id=req.tenant_id,
+        tenant_id=user.tenant_id,
     )
 
     # Find sweet spot: best duration where failure_pct < 20% and cpu < 85%
@@ -269,16 +278,16 @@ def worker_sweep(req: WorkerSweepRequest, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/runs", summary="List saved simulation runs")
+@router.get("/runs", summary="List saved simulation runs for your tenant")
 def list_runs(
     connection_id: Optional[str] = None,
-    tenant_id:     str = "local",
     limit:         int = 20,
     db:            Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
 ):
     """Returns saved simulation runs, most recent first."""
     conditions = ["tenant_id=:tid"]
-    params: Dict[str, Any] = {"tid": tenant_id, "lim": limit}
+    params: Dict[str, Any] = {"tid": user.tenant_id, "lim": limit}
     if connection_id:
         conditions.append("connection_id=:cid")
         params["cid"] = connection_id
@@ -308,7 +317,11 @@ def list_runs(
 
 
 @router.get("/runs/{run_id}", summary="Get one saved simulation run")
-def get_run(run_id: str, db: Session = Depends(get_db)):
+def get_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     row = db.execute(
         text("SELECT * FROM simulation_runs WHERE id=:id"),
         {"id": run_id}
@@ -318,6 +331,8 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"Simulation run {run_id} not found")
 
     d = dict(row._mapping)
+    if not user.can("*") and d["tenant_id"] != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Simulation run {run_id} not found")
     for k, v in d.items():
         if hasattr(v, "hex"):        d[k] = str(v)
         if hasattr(v, "isoformat"):  d[k] = v.isoformat()

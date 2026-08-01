@@ -21,16 +21,60 @@ Maintenance mode is useful when:
     - Platform upgrade is being deployed
     - An infrastructure issue is detected
     - An operator needs to investigate a problem
+
+CHANGES IN THIS VERSION (Stage 1 schema audit fix):
+  Four real bugs found and fixed, confirmed against the live schema:
+
+  1. worker_heartbeats: same bug as worker_control.py — worker_id/status/
+     current_job_id don't exist (real columns: worker_name, worker_status;
+     current_job_id must be derived by joining migration_chunks). Every
+     query here that touched worker_heartbeats would have failed outright.
+
+  2. migration_jobs has NO `updated_at` and NO `error_message` column.
+     The old code wrote pause/cancel reasons into a nonexistent
+     error_message column and stamped a nonexistent updated_at — both
+     would raise "column does not exist" at the database level.
+     migration_jobs DOES already have purpose-built columns for exactly
+     this: paused_at, paused_by (uuid), cancelled_at, cancelled_by (uuid),
+     cancellation_reason (text), and last_error (text, for genuine
+     execution errors — not administrative pause/cancel notes). This
+     version uses those real columns instead.
+
+  3. Same UUID-cast issue as worker_control.py: operations_actions.tenant_id
+     / .operator_id and migration_jobs.paused_by / .cancelled_by are all
+     UUID columns, but this file's operator/tenant_id defaults were plain
+     strings ("operator", "local") that would fail a Postgres UUID cast.
+     Now coerced via _as_uuid_or_none(), which passes NULL when a real
+     UUID isn't available rather than crashing the query.
+
+  4. maintenance_mode has NO plain unique constraint on tenant_id (only a
+     partial unique index that applies solely when tenant_id IS NULL, for
+     enforcing a single global maintenance row). The old
+     `ON CONFLICT (tenant_id) DO UPDATE` clause doesn't match any real
+     constraint and would fail at the SQL level for every call. Replaced
+     with an explicit check-then-update-or-insert that handles both the
+     global (tenant_id IS NULL) and per-tenant cases correctly.
 """
 
 import datetime
 import json
+import uuid
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from backend.shared.config.redis import redis_client
 from backend.shared.config.logging import logger
+
+
+def _as_uuid_or_none(value):
+    """Coerce a string to UUID if possible, else None (for nullable UUID columns)."""
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 class JobControl:
@@ -61,11 +105,14 @@ class JobControl:
         if before_status not in ("running", "planning"):
             return {"error": f"Cannot pause job in status '{before_status}'"}
 
-        # Signal all workers for this job
+        # Signal all workers for this job (derived via migration_chunks,
+        # since worker_heartbeats has no current_job_id column)
         workers = db.execute(
             text("""
-                SELECT worker_id FROM worker_heartbeats
-                WHERE current_job_id=:jid AND status IN ('BUSY','IDLE')
+                SELECT DISTINCT wh.worker_name
+                FROM worker_heartbeats wh
+                JOIN migration_chunks mc ON mc.id = wh.current_chunk_id
+                WHERE mc.job_id=:jid AND wh.worker_status IN ('BUSY','IDLE')
             """),
             {"jid": job_id}
         ).fetchall()
@@ -73,16 +120,16 @@ class JobControl:
         for w in workers:
             redis_client.setex(f"migration:worker:{w[0]}:cmd", 300, "pause")
 
+        op_uuid = _as_uuid_or_none(operator)
         db.execute(
             text("""
                 UPDATE migration_jobs SET
                     status='paused',
-                    error_message=:msg,
-                    updated_at=:now
+                    paused_at=:now,
+                    paused_by=:op
                 WHERE id=:id
             """),
-            {"msg": f"Paused by operator: {reason}",
-             "now": datetime.datetime.utcnow(), "id": job_id}
+            {"now": datetime.datetime.utcnow(), "op": op_uuid, "id": job_id}
         )
         db.commit()
 
@@ -122,7 +169,12 @@ class JobControl:
 
         # Clear worker pause commands
         workers = db.execute(
-            text("SELECT worker_id FROM worker_heartbeats WHERE current_job_id=:jid"),
+            text("""
+                SELECT DISTINCT wh.worker_name
+                FROM worker_heartbeats wh
+                JOIN migration_chunks mc ON mc.id = wh.current_chunk_id
+                WHERE mc.job_id=:jid
+            """),
             {"jid": job_id}
         ).fetchall()
         for w in workers:
@@ -131,10 +183,10 @@ class JobControl:
         db.execute(
             text("""
                 UPDATE migration_jobs SET
-                    status='running', error_message=NULL, updated_at=:now
+                    status='running', paused_at=NULL, paused_by=NULL
                 WHERE id=:id
             """),
-            {"now": datetime.datetime.utcnow(), "id": job_id}
+            {"id": job_id}
         )
         db.commit()
 
@@ -179,23 +231,30 @@ class JobControl:
 
         # Signal workers to drain
         workers = db.execute(
-            text("SELECT worker_id FROM worker_heartbeats WHERE current_job_id=:jid"),
+            text("""
+                SELECT DISTINCT wh.worker_name
+                FROM worker_heartbeats wh
+                JOIN migration_chunks mc ON mc.id = wh.current_chunk_id
+                WHERE mc.job_id=:jid
+            """),
             {"jid": job_id}
         ).fetchall()
         for w in workers:
             redis_client.setex(f"migration:worker:{w[0]}:cmd", 300, "drain")
 
+        op_uuid = _as_uuid_or_none(operator)
         db.execute(
             text("""
                 UPDATE migration_jobs SET
                     status='cancelled',
-                    error_message=:msg,
-                    completed_at=:now,
-                    updated_at=:now
+                    cancelled_at=:now,
+                    cancelled_by=:op,
+                    cancellation_reason=:reason,
+                    completed_at=:now
                 WHERE id=:id
             """),
-            {"msg": f"Cancelled by operator: {reason}",
-             "now": datetime.datetime.utcnow(), "id": job_id}
+            {"reason": reason, "now": datetime.datetime.utcnow(),
+             "op": op_uuid, "id": job_id}
         )
         db.commit()
 
@@ -224,7 +283,6 @@ class JobControl:
         Re-run post-migration validation for a completed job.
         Optionally target a specific table.
         """
-        # Find completed chunks for this job (optionally filtered by table)
         conditions = ["mc.job_id=:jid", "mc.status='completed'"]
         params: Dict[str, Any] = {"jid": job_id}
 
@@ -246,14 +304,14 @@ class JobControl:
         if not chunks:
             return {"error": "No completed chunks found to re-validate"}
 
-        # Reset validation status on these chunks to trigger re-verification
         chunk_ids = [str(c[0]) for c in chunks]
         db.execute(
-            text(f"""
+            text("""
                 UPDATE migration_chunks
                 SET validation_status='pending'
-                WHERE id = ANY(ARRAY[{','.join([f"'{cid}'" for cid in chunk_ids])}]::uuid[])
-            """)
+                WHERE id = ANY(:ids::uuid[])
+            """),
+            {"ids": chunk_ids}
         )
         db.commit()
 
@@ -289,13 +347,9 @@ class JobControl:
                     COUNT(*) FILTER (WHERE mc.status='skipped')           AS skipped_chunks,
                     SUM(mc.rows_processed)                                AS rows_migrated,
                     AVG(mc.duration_ms) FILTER (WHERE mc.duration_ms > 0) AS avg_chunk_ms,
-                    MAX(mc.completed_at)                                  AS last_completed_at,
-                    COUNT(DISTINCT wh.worker_id) FILTER (
-                        WHERE wh.last_heartbeat > NOW() - INTERVAL '2 minutes'
-                    )                                                     AS active_workers
+                    MAX(mc.completed_at)                                  AS last_completed_at
                 FROM migration_jobs mj
                 LEFT JOIN migration_chunks mc ON mc.job_id = mj.id
-                LEFT JOIN worker_heartbeats wh ON wh.current_job_id = mj.id
                 WHERE mj.id = :jid
                 GROUP BY mj.id, mj.status, mj.started_at
             """),
@@ -307,13 +361,25 @@ class JobControl:
 
         d = dict(row._mapping)
 
-        # Compute progress %
+        # Active workers derived separately via the migration_chunks join
+        # (worker_heartbeats has no current_job_id column to join on directly)
+        active_row = db.execute(
+            text("""
+                SELECT COUNT(DISTINCT wh.worker_name)
+                FROM worker_heartbeats wh
+                JOIN migration_chunks mc ON mc.id = wh.current_chunk_id
+                WHERE mc.job_id = :jid
+                AND wh.last_heartbeat > NOW() - INTERVAL '2 minutes'
+            """),
+            {"jid": job_id}
+        ).fetchone()
+        active_workers = int(active_row[0] or 0) if active_row else 0
+
         total     = int(d.get("total_chunks") or 0)
         completed = int(d.get("completed_chunks") or 0)
         failed    = int(d.get("failed_chunks") or 0)
         progress  = round(completed / total * 100, 1) if total > 0 else 0
 
-        # Compute throughput (rows/sec over last 5 min)
         tput_row = db.execute(
             text("""
                 SELECT SUM(rows_processed)::float / 300 AS rps
@@ -324,13 +390,11 @@ class JobControl:
         ).fetchone()
         rps = round(float(tput_row[0] or 0), 1) if tput_row else 0
 
-        # ETA
         pending    = int(d.get("pending_chunks") or 0)
         avg_ms     = float(d.get("avg_chunk_ms") or 0)
-        active_w   = int(d.get("active_workers") or 1)
-        eta_sec    = int((pending * avg_ms / 1000) / max(active_w, 1)) if avg_ms > 0 else None
+        active_w   = max(active_workers, 1)
+        eta_sec    = int((pending * avg_ms / 1000) / active_w) if avg_ms > 0 else None
 
-        # Format timestamps
         for k, v in d.items():
             if hasattr(v, "isoformat"): d[k] = v.isoformat()
             if hasattr(v, "hex"):       d[k] = str(v)
@@ -347,7 +411,7 @@ class JobControl:
             "skipped_chunks":  int(d.get("skipped_chunks") or 0),
             "rows_migrated":   int(d.get("rows_migrated") or 0),
             "rows_per_sec":    rps,
-            "active_workers":  active_w,
+            "active_workers":  active_workers,
             "avg_chunk_ms":    round(avg_ms, 0),
             "eta_seconds":     eta_sec,
             "eta_str":         self._fmt(eta_sec) if eta_sec else "unknown",
@@ -372,18 +436,35 @@ class JobControl:
 
         redis_client.set("migration:maintenance:active", "1")
 
-        db.execute(
-            text("""
-                INSERT INTO maintenance_mode (tenant_id, is_active, reason, activated_by, activated_at, updated_at)
-                VALUES (:tid, TRUE, :reason, :op, :now, :now)
-                ON CONFLICT (tenant_id) DO UPDATE SET
+        tid = _as_uuid_or_none(tenant_id)
+        op_uuid = _as_uuid_or_none(operator)
+        now = datetime.datetime.utcnow()
+
+        # No plain unique constraint exists on tenant_id (only a partial
+        # index for the NULL/global case), so ON CONFLICT can't target it.
+        # Do an explicit update-or-insert instead.
+        where_clause = "tenant_id IS NULL" if tid is None else "tenant_id = :tid"
+        updated = db.execute(
+            text(f"""
+                UPDATE maintenance_mode SET
                     is_active=TRUE, reason=:reason, activated_by=:op,
                     activated_at=:now, updated_at=:now
+                WHERE {where_clause}
             """),
-            {"tid": tenant_id, "reason": reason, "op": operator,
-             "now": datetime.datetime.utcnow()}
+            {"reason": reason, "op": op_uuid, "now": now, "tid": tid}
         )
         db.commit()
+
+        if updated.rowcount == 0:
+            db.execute(
+                text("""
+                    INSERT INTO maintenance_mode
+                        (tenant_id, is_active, reason, activated_by, activated_at, updated_at)
+                    VALUES (:tid, TRUE, :reason, :op, :now, :now)
+                """),
+                {"tid": tid, "reason": reason, "op": op_uuid, "now": now}
+            )
+            db.commit()
 
         self._log_action(db, "maintenance_mode_on", "system", tenant_id,
                          {"maintenance": False}, {"maintenance": True, "reason": reason},
@@ -407,13 +488,15 @@ class JobControl:
         """Disable maintenance mode and return platform to normal operation."""
         redis_client.delete("migration:maintenance:active")
 
+        tid = _as_uuid_or_none(tenant_id)
+        where_clause = "tenant_id IS NULL" if tid is None else "tenant_id = :tid"
         db.execute(
-            text("""
+            text(f"""
                 UPDATE maintenance_mode SET
                     is_active=FALSE, deactivated_at=:now, updated_at=:now
-                WHERE tenant_id=:tid
+                WHERE {where_clause}
             """),
-            {"now": datetime.datetime.utcnow(), "tid": tenant_id}
+            {"now": datetime.datetime.utcnow(), "tid": tid}
         )
         db.commit()
 
@@ -439,14 +522,12 @@ class JobControl:
         if not reason:
             return {"error": "reason is required for emergency stop"}
 
-        # Enable maintenance mode first
         self.enable_maintenance(db, f"EMERGENCY STOP: {reason}", operator, tenant_id)
 
-        # Kill all active workers immediately
         workers = db.execute(
             text("""
-                SELECT worker_id FROM worker_heartbeats
-                WHERE status IN ('BUSY','IDLE')
+                SELECT worker_name FROM worker_heartbeats
+                WHERE worker_status IN ('BUSY','IDLE')
                 AND last_heartbeat > NOW() - INTERVAL '5 minutes'
             """)
         ).fetchall()
@@ -456,16 +537,16 @@ class JobControl:
             redis_client.setex(f"migration:worker:{w[0]}:cmd", 300, "kill")
             killed += 1
 
-        # Pause all running jobs
+        op_uuid = _as_uuid_or_none(operator)
         db.execute(
             text("""
                 UPDATE migration_jobs SET
                     status='paused',
-                    error_message=:msg,
-                    updated_at=:now
+                    paused_at=:now,
+                    paused_by=:op
                 WHERE status='running'
             """),
-            {"msg": f"EMERGENCY STOP: {reason}", "now": datetime.datetime.utcnow()}
+            {"now": datetime.datetime.utcnow(), "op": op_uuid}
         )
         db.commit()
 
@@ -488,9 +569,11 @@ class JobControl:
         }
 
     def get_maintenance_status(self, db: Session, tenant_id: str = "local") -> Dict[str, Any]:
+        tid = _as_uuid_or_none(tenant_id)
+        where_clause = "tenant_id IS NULL" if tid is None else "tenant_id = :tid"
         row = db.execute(
-            text("SELECT * FROM maintenance_mode WHERE tenant_id=:tid"),
-            {"tid": tenant_id}
+            text(f"SELECT * FROM maintenance_mode WHERE {where_clause} LIMIT 1"),
+            {"tid": tid}
         ).fetchone()
         if not row:
             return {"maintenance_mode": False, "tenant_id": tenant_id}
@@ -515,7 +598,8 @@ class JobControl:
                          :rid, :before::jsonb, :after::jsonb, :reason, :now)
                 """),
                 {
-                    "tid":    tenant_id, "op":     operator,
+                    "tid":    _as_uuid_or_none(tenant_id),
+                    "op":     _as_uuid_or_none(operator),
                     "atype":  action_type, "rtype": resource_type,
                     "rid":    str(resource_id),
                     "before": json.dumps(before, default=str),

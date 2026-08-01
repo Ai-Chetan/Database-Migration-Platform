@@ -25,7 +25,11 @@ comparator = SchemaComparator()
 
 
 @router.post("/compare", summary="Compare source and target schemas")
-def compare_schemas(req: CompareRequest, db: Session = Depends(get_db)):
+def compare_schemas(
+    req: CompareRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Compares two saved schema versions and returns a full structured diff.
 
@@ -60,7 +64,11 @@ def compare_schemas(req: CompareRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/analyze-type", summary="Analyze a single type conversion", response_model=TypeAnalysisResponse)
-def analyze_type(req: TypeAnalysisRequest, db: Session = Depends(get_db)):
+def analyze_type(
+    req: TypeAnalysisRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Analyze whether a specific type conversion is safe, lossy, unsafe, or conditional.
 
@@ -101,16 +109,15 @@ def analyze_table_types(
     column_mapping: dict,    # {src_col: tgt_col}
     source_db: str = "mysql",
     target_db: str = "mysql",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
 ):
     """
     Analyze type conversions for all mapped columns between two tables.
     Returns a dict of {target_col: conversion_result} for each mapped pair.
     """
-    src_version = repo.get_schema_version(db, source_schema_id)
-    tgt_version = repo.get_schema_version(db, target_schema_id)
-    if not src_version or not tgt_version:
-        raise HTTPException(status_code=404, detail="Schema version not found")
+    src_version = _owned_schema(db, source_schema_id, user)
+    tgt_version = _owned_schema(db, target_schema_id, user)
 
     src_cols = src_version["schema_data"]["tables"].get(source_table, {}).get("columns", {})
     tgt_cols = tgt_version["schema_data"]["tables"].get(target_table, {}).get("columns", {})
