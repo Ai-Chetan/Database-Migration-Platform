@@ -15,11 +15,21 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.validation_engine.validator import ValidationEngine
 from backend.schema_mapping_service.app.repositories.mapping_repository import MappingRepository
 
 router = APIRouter(prefix="/projects", tags=["Validation"])
 repo   = MappingRepository()
+
+
+def _owned_project(db: Session, project_id: str, user: CurrentUser) -> dict:
+    project = repo.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    if not user.can("*") and project.get("tenant_id") != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return project
 
 
 class ValidateRequest(BaseModel):
@@ -31,7 +41,11 @@ class ValidateRequest(BaseModel):
 
 
 @router.post("/{project_id}/validate", summary="Validate all tables in a project")
-def validate_project(project_id: str, req: ValidateRequest, db: Session = Depends(get_db)):
+def validate_project(
+    project_id: str, req: ValidateRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Runs validation for every table mapping in the project.
 
@@ -44,9 +58,7 @@ def validate_project(project_id: str, req: ValidateRequest, db: Session = Depend
 
     Results are saved to schema_validation_results and returned.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])
@@ -120,12 +132,11 @@ def validate_table(
     project_id: str,
     table_name: str,
     req: ValidateRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
 ):
     """Validate a single source table for a project."""
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     if not req.source_config or not req.target_config:
         raise HTTPException(status_code=400, detail="Provide source_config and target_config")
@@ -176,11 +187,13 @@ def validate_table(
 
 
 @router.get("/{project_id}/validation-results", summary="Get saved validation results")
-def get_validation_results(project_id: str, db: Session = Depends(get_db)):
+def get_validation_results(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """Return all validation results previously saved for a project."""
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     rows = db.execute(
         text("""

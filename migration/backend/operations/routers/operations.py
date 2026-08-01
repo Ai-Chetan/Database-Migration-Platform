@@ -39,6 +39,26 @@ aspect of a running migration.
 ── AUDIT LOG ─────────────────────────────────────────────────────────────────
     GET  /ops/actions                          List all operator actions
     GET  /ops/actions/{resource_id}            Actions for one resource
+
+CHANGES IN THIS VERSION (Stage 1 schema + security audit fix):
+  1. This router had NO authentication at all - every endpoint, including
+     kill_worker, cancel_job, and emergency_stop, was reachable by anyone
+     who could reach the API, unauthenticated. Added
+     Depends(require_permission(...)) on every route, using the same
+     enterprise/security/rbac/auth.py system as the rest of the platform,
+     with the "operations:read" / "operations:write" permissions already
+     seeded in db_migrations/017_seed_roles.sql.
+  2. operator / tenant_id were previously plain strings supplied by the
+     REQUEST BODY - meaning any caller could claim to be any operator name
+     in the audit log, and (per the operations_actions UUID-column bug
+     fixed in worker_control.py / job_control.py / chunk_control.py) those
+     values would have failed to insert anyway. Both are now taken from
+     the authenticated user (user.user_id, user.tenant_id) instead of
+     trusting client input.
+  3. list_actions() filtered `WHERE tenant_id=:tid` against
+     operations_actions.tenant_id (a UUID column) using a plain string
+     query-param default ("local") - same UUID-cast bug, now fixed by
+     scoping to the authenticated user's real tenant_id automatically.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -48,6 +68,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.operations.worker_control.worker_control import WorkerControl
 from backend.operations.chunk_control.chunk_control import ChunkControl
 from backend.operations.job_control.job_control import JobControl
@@ -58,40 +79,34 @@ chunk_ctrl    = ChunkControl()
 job_ctrl      = JobControl()
 
 
-# ── Request models ─────────────────────────────────────────────────────────────
+# ── Request models (operator/tenant_id removed - derived from the
+#    authenticated user instead of trusted client input) ──────────────────────
 
 class ActionRequest(BaseModel):
-    reason:    str = ""
-    operator:  str = "operator"
-    tenant_id: str = "local"
+    reason: str = ""
 
 class ScaleRequest(BaseModel):
     target_count: int
     reason:       str = ""
-    operator:     str = "operator"
-    tenant_id:    str = "local"
 
 class ReassignRequest(BaseModel):
     target_worker: Optional[str] = None
     reason:        str = ""
-    operator:      str = "operator"
-    tenant_id:     str = "local"
 
 class MaintenanceRequest(BaseModel):
-    reason:    str
-    operator:  str = "operator"
-    tenant_id: str = "local"
+    reason: str
 
 class ValidationRequest(BaseModel):
     table_name: Optional[str] = None
-    operator:   str = "operator"
-    tenant_id:  str = "local"
 
 
 # ── Worker Control endpoints ───────────────────────────────────────────────────
 
 @router.get("/workers", summary="List all active workers")
-def list_all_workers(db: Session = Depends(get_db)):
+def list_all_workers(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:read")),
+):
     """
     Returns all workers with current status, job, chunk, and last heartbeat.
     Stale workers (no heartbeat >2 min) are flagged as potentially offline.
@@ -109,63 +124,95 @@ def list_all_workers(db: Session = Depends(get_db)):
 
 
 @router.get("/workers/{job_id}/job", summary="List workers for a specific job")
-def list_job_workers(job_id: str, db: Session = Depends(get_db)):
+def list_job_workers(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:read")),
+):
     workers = worker_ctrl.list_workers(db, job_id=job_id)
     return {"job_id": job_id, "worker_count": len(workers), "workers": workers}
 
 
 @router.post("/workers/{worker_id}/pause", summary="Pause a worker after current chunk")
-def pause_worker(worker_id: str, req: ActionRequest, db: Session = Depends(get_db)):
-    return worker_ctrl.pause_worker(db, worker_id, req.reason, req.operator, req.tenant_id)
+def pause_worker(
+    worker_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
+    return worker_ctrl.pause_worker(db, worker_id, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/workers/{worker_id}/resume", summary="Resume a paused worker")
-def resume_worker(worker_id: str, req: ActionRequest, db: Session = Depends(get_db)):
-    return worker_ctrl.resume_worker(db, worker_id, req.reason, req.operator, req.tenant_id)
+def resume_worker(
+    worker_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
+    return worker_ctrl.resume_worker(db, worker_id, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/workers/{worker_id}/kill", summary="Kill a worker immediately")
-def kill_worker(worker_id: str, req: ActionRequest, db: Session = Depends(get_db)):
+def kill_worker(
+    worker_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """
     Sends an immediate stop signal. In-progress chunk will be abandoned
     and retried by stale chunk recovery. Use when a worker is stuck.
     """
     if not req.reason:
         raise HTTPException(status_code=400, detail="reason is required when killing a worker")
-    return worker_ctrl.kill_worker(db, worker_id, req.reason, req.operator, req.tenant_id)
+    return worker_ctrl.kill_worker(db, worker_id, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/workers/{worker_id}/quarantine", summary="Quarantine a worker for investigation")
-def quarantine_worker(worker_id: str, req: ActionRequest, db: Session = Depends(get_db)):
+def quarantine_worker(
+    worker_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """Pauses the worker AND flags it as quarantined for operator investigation."""
     if not req.reason:
         raise HTTPException(status_code=400, detail="reason is required when quarantining a worker")
-    return worker_ctrl.quarantine_worker(db, worker_id, req.reason, req.operator, req.tenant_id)
+    return worker_ctrl.quarantine_worker(db, worker_id, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/jobs/{job_id}/workers/scale", summary="Set target worker count for a job")
-def scale_workers(job_id: str, req: ScaleRequest, db: Session = Depends(get_db)):
+def scale_workers(
+    job_id: str, req: ScaleRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """
     Override the target worker count for a running job.
     Workers themselves must be started/stopped manually — this sets the
     desired count that the Self-Tuning Engine and resource governor respect.
     """
     return worker_ctrl.scale_workers(
-        db, job_id, req.target_count, req.reason, req.operator, req.tenant_id
+        db, job_id, req.target_count, req.reason, user.user_id, user.tenant_id
     )
 
 
 @router.post("/jobs/{job_id}/workers/drain", summary="Gracefully drain all workers for a job")
-def drain_workers(job_id: str, req: ActionRequest, db: Session = Depends(get_db)):
+def drain_workers(
+    job_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """Signal all workers for this job to finish current chunk then stop."""
-    return worker_ctrl.drain_all_workers(db, job_id, req.reason, req.operator, req.tenant_id)
+    return worker_ctrl.drain_all_workers(db, job_id, req.reason, user.user_id, user.tenant_id)
 
 
 # ── Chunk Control endpoints ────────────────────────────────────────────────────
 
 @router.get("/jobs/{job_id}/chunks/problems",
             summary="List chunks needing operator attention")
-def list_problem_chunks(job_id: str, limit: int = 50, db: Session = Depends(get_db)):
+def list_problem_chunks(
+    job_id: str, limit: int = 50,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:read")),
+):
     """
     Returns failed chunks, stale running chunks, and high-retry chunks.
     This is the primary Operations Console view for chunk-level triage.
@@ -182,7 +229,11 @@ def list_problem_chunks(job_id: str, limit: int = 50, db: Session = Depends(get_
 
 
 @router.get("/chunks/{chunk_id}", summary="Get full detail for one chunk")
-def get_chunk_detail(chunk_id: str, db: Session = Depends(get_db)):
+def get_chunk_detail(
+    chunk_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:read")),
+):
     detail = chunk_ctrl.get_chunk_detail(db, chunk_id)
     if not detail:
         raise HTTPException(status_code=404, detail=f"Chunk {chunk_id} not found")
@@ -190,25 +241,37 @@ def get_chunk_detail(chunk_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/chunks/{chunk_id}/reassign", summary="Reassign chunk to different worker or queue")
-def reassign_chunk(chunk_id: str, req: ReassignRequest, db: Session = Depends(get_db)):
+def reassign_chunk(
+    chunk_id: str, req: ReassignRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """
     Move a stuck chunk to a different worker, or return it to the queue.
     target_worker=null → return to queue for any available worker.
     target_worker="worker-id" → assign directly to that worker.
     """
     return chunk_ctrl.reassign_chunk(
-        db, chunk_id, req.target_worker, req.reason, req.operator, req.tenant_id
+        db, chunk_id, req.target_worker, req.reason, user.user_id, user.tenant_id
     )
 
 
 @router.post("/chunks/{chunk_id}/retry", summary="Force retry a failed chunk")
-def retry_chunk(chunk_id: str, req: ActionRequest, db: Session = Depends(get_db)):
+def retry_chunk(
+    chunk_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """Reset a failed chunk to pending for retry, bypassing the retry count limit."""
-    return chunk_ctrl.retry_chunk(db, chunk_id, req.reason, req.operator, req.tenant_id)
+    return chunk_ctrl.retry_chunk(db, chunk_id, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/chunks/{chunk_id}/skip", summary="Skip a chunk (data will not be migrated)")
-def skip_chunk(chunk_id: str, req: ActionRequest, db: Session = Depends(get_db)):
+def skip_chunk(
+    chunk_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """
     Mark a chunk as skipped. Data in this PK range will NOT be migrated.
     Requires a reason. Use when data is known-bad or handled separately.
@@ -216,13 +279,17 @@ def skip_chunk(chunk_id: str, req: ActionRequest, db: Session = Depends(get_db))
     if not req.reason:
         raise HTTPException(status_code=400,
                             detail="reason is required when skipping a chunk")
-    return chunk_ctrl.skip_chunk(db, chunk_id, req.reason, req.operator, req.tenant_id)
+    return chunk_ctrl.skip_chunk(db, chunk_id, req.reason, user.user_id, user.tenant_id)
 
 
 # ── Job Control endpoints ──────────────────────────────────────────────────────
 
 @router.get("/jobs/{job_id}/live-stats", summary="Real-time job statistics")
-def get_live_stats(job_id: str, db: Session = Depends(get_db)):
+def get_live_stats(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:read")),
+):
     """
     Returns live progress, throughput (rows/sec), ETA, active workers,
     error rate, and chunk breakdown — everything the Job Monitor UI needs.
@@ -234,17 +301,29 @@ def get_live_stats(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/jobs/{job_id}/pause", summary="Pause a running job")
-def pause_job(job_id: str, req: ActionRequest, db: Session = Depends(get_db)):
-    return job_ctrl.pause_job(db, job_id, req.reason, req.operator, req.tenant_id)
+def pause_job(
+    job_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
+    return job_ctrl.pause_job(db, job_id, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/jobs/{job_id}/resume", summary="Resume a paused job")
-def resume_job(job_id: str, req: ActionRequest, db: Session = Depends(get_db)):
-    return job_ctrl.resume_job(db, job_id, req.reason, req.operator, req.tenant_id)
+def resume_job(
+    job_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
+    return job_ctrl.resume_job(db, job_id, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/jobs/{job_id}/cancel", summary="Cancel a job permanently")
-def cancel_job(job_id: str, req: ActionRequest, db: Session = Depends(get_db)):
+def cancel_job(
+    job_id: str, req: ActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """
     Permanently cancels a job. Cannot be undone.
     Workers drain gracefully. Use rollback if target data needs cleanup.
@@ -252,45 +331,67 @@ def cancel_job(job_id: str, req: ActionRequest, db: Session = Depends(get_db)):
     if not req.reason:
         raise HTTPException(status_code=400,
                             detail="reason is required when cancelling a job")
-    return job_ctrl.cancel_job(db, job_id, req.reason, req.operator, req.tenant_id)
+    return job_ctrl.cancel_job(db, job_id, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/jobs/{job_id}/rerun-validation",
              summary="Re-run post-migration validation")
-def rerun_validation(job_id: str, req: ValidationRequest, db: Session = Depends(get_db)):
+def rerun_validation(
+    job_id: str, req: ValidationRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:write")),
+):
     """
     Resets validation status on completed chunks, triggering re-verification
     by the next available worker. Optionally filter to one table.
     """
     return job_ctrl.rerun_validation(
-        db, job_id, req.table_name, req.operator, req.tenant_id
+        db, job_id, req.table_name, user.user_id, user.tenant_id
     )
 
 
 # ── Maintenance Mode endpoints ─────────────────────────────────────────────────
+# Maintenance mode is platform-wide and destructive (emergency-stop halts
+# every running job) - restricted to tenant_admin/platform_admin via the
+# "operations:*" / "*:*" permission sets seeded for those roles, rather
+# than the broader "operations:write" that migration_admin/operator also hold.
 
 @router.get("/maintenance", summary="Get maintenance mode status")
-def get_maintenance(tenant_id: str = "local", db: Session = Depends(get_db)):
-    return job_ctrl.get_maintenance_status(db, tenant_id)
+def get_maintenance(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:read")),
+):
+    return job_ctrl.get_maintenance_status(db, user.tenant_id)
 
 
 @router.post("/maintenance/enable", summary="Enable maintenance mode")
-def enable_maintenance(req: MaintenanceRequest, db: Session = Depends(get_db)):
+def enable_maintenance(
+    req: MaintenanceRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:admin")),
+):
     """
     Blocks new job starts. Workers finish current chunks then stop.
     Required before platform upgrades or infrastructure maintenance.
     """
-    return job_ctrl.enable_maintenance(db, req.reason, req.operator, req.tenant_id)
+    return job_ctrl.enable_maintenance(db, req.reason, user.user_id, user.tenant_id)
 
 
 @router.post("/maintenance/disable", summary="Disable maintenance mode")
-def disable_maintenance(req: ActionRequest, db: Session = Depends(get_db)):
-    return job_ctrl.disable_maintenance(db, req.operator, req.tenant_id)
+def disable_maintenance(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:admin")),
+):
+    return job_ctrl.disable_maintenance(db, user.user_id, user.tenant_id)
 
 
 @router.post("/maintenance/emergency-stop",
              summary="EMERGENCY: Halt all jobs and workers immediately")
-def emergency_stop(req: MaintenanceRequest, db: Session = Depends(get_db)):
+def emergency_stop(
+    req: MaintenanceRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:admin")),
+):
     """
     EMERGENCY USE ONLY. Kills all workers immediately and pauses all jobs.
     Enables maintenance mode. Requires manual intervention to resume.
@@ -298,22 +399,23 @@ def emergency_stop(req: MaintenanceRequest, db: Session = Depends(get_db)):
     if not req.reason:
         raise HTTPException(status_code=400,
                             detail="reason is required for emergency stop")
-    return job_ctrl.emergency_stop(db, req.reason, req.operator, req.tenant_id)
+    return job_ctrl.emergency_stop(db, req.reason, user.user_id, user.tenant_id)
 
 
 # ── Audit Log endpoints ────────────────────────────────────────────────────────
 
 @router.get("/actions", summary="List all operator actions")
 def list_actions(
-    tenant_id:     str = "local",
     resource_type: Optional[str] = None,
     action_type:   Optional[str] = None,
     limit:         int = 100,
     db:            Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:read")),
 ):
-    """Returns the full audit log of operator actions via the Operations Console."""
+    """Returns the full audit log of operator actions via the Operations Console,
+    scoped to the caller's own tenant."""
     conditions = ["tenant_id=:tid"]
-    params: Dict[str, Any] = {"tid": tenant_id, "lim": limit}
+    params: Dict[str, Any] = {"tid": user.tenant_id, "lim": limit}
 
     if resource_type:
         conditions.append("resource_type=:rtype")
@@ -344,8 +446,11 @@ def list_actions(
 
 
 @router.get("/actions/{resource_id}", summary="Get operator actions for one resource")
-def get_resource_actions(resource_id: str, limit: int = 50,
-                         db: Session = Depends(get_db)):
+def get_resource_actions(
+    resource_id: str, limit: int = 50,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("operations:read")),
+):
     rows = db.execute(
         text("""
             SELECT id, operator_id, action_type, resource_type,

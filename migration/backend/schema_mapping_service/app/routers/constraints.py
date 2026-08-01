@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.constraint_index_mapping.constraint_mapper import (
     ConstraintIndexMapper
 )
@@ -24,6 +25,13 @@ from backend.schema_mapping_service.app.repositories.mapping_repository import M
 router  = APIRouter(prefix="/projects", tags=["Constraints & Indexes"])
 repo    = MappingRepository()
 mapper  = ConstraintIndexMapper()
+
+
+def _owned_project(db: Session, project_id: str, user: CurrentUser) -> dict:
+    project = _owned_project(db, project_id, user)
+    if not user.can("*") and project.get("tenant_id") != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return project
 
 
 class DDLRequest(BaseModel):
@@ -50,7 +58,11 @@ def _build_table_mappings(db, project_id: str) -> dict:
 
 @router.post("/{project_id}/ddl/create-tables",
              summary="Generate Phase 1 DDL: CREATE TABLE statements (no indexes)")
-def generate_create_tables(project_id: str, req: DDLRequest, db: Session = Depends(get_db)):
+def generate_create_tables(
+    project_id: str, req: DDLRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Generates CREATE TABLE statements WITHOUT indexes or FK constraints.
 
@@ -61,9 +73,7 @@ def generate_create_tables(project_id: str, req: DDLRequest, db: Session = Depen
 
     Run these statements on the target DB BEFORE starting workers.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])
@@ -91,16 +101,18 @@ def generate_create_tables(project_id: str, req: DDLRequest, db: Session = Depen
 
 @router.post("/{project_id}/ddl/indexes",
              summary="Generate Phase 3 DDL: CREATE INDEX statements (run after data load)")
-def generate_indexes(project_id: str, req: DDLRequest, db: Session = Depends(get_db)):
+def generate_indexes(
+    project_id: str, req: DDLRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Generates CREATE INDEX and UNIQUE constraint statements.
 
     Run these AFTER all workers have finished loading data.
     Building indexes after bulk load is significantly faster.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])
@@ -128,16 +140,18 @@ def generate_indexes(project_id: str, req: DDLRequest, db: Session = Depends(get
 
 @router.post("/{project_id}/ddl/foreign-keys",
              summary="Generate Phase 4 DDL: ADD FOREIGN KEY constraints")
-def generate_foreign_keys(project_id: str, req: DDLRequest, db: Session = Depends(get_db)):
+def generate_foreign_keys(
+    project_id: str, req: DDLRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Generates ALTER TABLE ... ADD FOREIGN KEY statements.
 
     Run these LAST — after all tables are loaded and indexes are built.
     FK constraints require referenced rows to already exist in target.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])
@@ -165,7 +179,11 @@ def generate_foreign_keys(project_id: str, req: DDLRequest, db: Session = Depend
 
 @router.post("/{project_id}/ddl/full",
              summary="Generate all 4 phases of DDL combined")
-def generate_full_ddl(project_id: str, req: DDLRequest, db: Session = Depends(get_db)):
+def generate_full_ddl(
+    project_id: str, req: DDLRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Returns all DDL phases together with clear execution order instructions.
 
@@ -175,9 +193,7 @@ def generate_full_ddl(project_id: str, req: DDLRequest, db: Session = Depends(ge
       Phase 3: Run CREATE INDEX statements → after workers done
       Phase 4: Run ADD FOREIGN KEY         → after indexes built
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])
@@ -221,7 +237,11 @@ def generate_full_ddl(project_id: str, req: DDLRequest, db: Session = Depends(ge
 
 @router.get("/{project_id}/ddl/analyze",
             summary="Analyze constraint conflicts between source and target")
-def analyze_constraints(project_id: str, db: Session = Depends(get_db)):
+def analyze_constraints(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Compares source and target schema constraints and flags conflicts.
 
@@ -231,9 +251,7 @@ def analyze_constraints(project_id: str, db: Session = Depends(get_db)):
       - Unique constraints that may conflict with existing data
       - Column type incompatibilities that affect constraints
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])

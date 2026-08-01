@@ -107,37 +107,41 @@ def _include(router, prefix="", tags=None):
 
 # ── 1. Control Plane ──────────────────────────────────────────────────────────
 try:
-    from backend.control_plane.app.routers import jobs, planning, connections
+    from backend.control_plane.app.routers import jobs, planning
     app.include_router(jobs.router)
     app.include_router(planning.router)
-    app.include_router(connections.router)
 except Exception as e:
     print(f"[WARN] Control Plane routers not loaded: {e}")
 
 # ── 2. Schema Mapping Service ─────────────────────────────────────────────────
 try:
     from backend.schema_mapping_service.app.routers import (
-        schema_discovery, schema_comparison, mapping_projects,
-        column_mappings, validation, dry_run
+        discovery, comparison, projects, mappings, validation,
+        planning as schema_planning, constraints, recommendation, scripts, versioning
     )
-    app.include_router(schema_discovery.router)
-    app.include_router(schema_comparison.router)
-    app.include_router(mapping_projects.router)
-    app.include_router(column_mappings.router)
+    app.include_router(discovery.router)
+    app.include_router(comparison.router)
+    app.include_router(projects.router)
+    app.include_router(mappings.router)
     app.include_router(validation.router)
-    app.include_router(dry_run.router)
+    app.include_router(schema_planning.router)
+    app.include_router(constraints.router)
+    app.include_router(recommendation.router)
+    app.include_router(scripts.router)
+    app.include_router(versioning.router)
 except Exception as e:
     print(f"[WARN] Schema Mapping routers not loaded: {e}")
 
 # ── 3. Enterprise Security + SaaS (CANONICAL auth system — kept) ─────────────
 try:
-    from backend.enterprise.routers import auth, tenants, approvals, templates, audit, secrets
+    from backend.enterprise.routers import auth, tenants, approvals, templates, audit, secrets, connections
     app.include_router(auth.router)
     app.include_router(tenants.router)
     app.include_router(approvals.router)
     app.include_router(templates.router)
     app.include_router(audit.router)
     app.include_router(secrets.router)
+    app.include_router(connections.router)
 except Exception as e:
     print(f"[WARN] Security routers not loaded: {e}")
 
@@ -215,9 +219,17 @@ except Exception as e:
     print(f"[WARN] Scheduler/Reporting/KB router not loaded: {e}")
 
 # ── 14. Monitoring (basic endpoints — full metrics on port 8001) ──────────────
+# NOTE: monitoring/jobs.py's list/detail endpoints overlap with control_plane's
+# /jobs (registered first, so those two paths are effectively dead code here —
+# harmless, not a crash). The genuinely additive, non-overlapping endpoints are
+# GET /jobs/{job_id}/tables, GET /jobs/{job_id}/chunks, GET /jobs/{job_id}/metrics,
+# and GET /metrics (platform-wide). See handoff summary for the full breakdown.
 try:
-    from backend.monitoring_service.app.routers import monitoring
-    app.include_router(monitoring.router)
+    from backend.monitoring_service.app.routers import jobs as monitoring_jobs, workers as monitoring_workers, chunks as monitoring_chunks, metrics as monitoring_metrics
+    app.include_router(monitoring_jobs.router)
+    app.include_router(monitoring_workers.router)
+    app.include_router(monitoring_chunks.router)
+    app.include_router(monitoring_metrics.router)
 except Exception as e:
     print(f"[WARN] Monitoring router not loaded: {e}")
 

@@ -127,7 +127,7 @@ export interface Worker {
   current_job_id: string | null
   last_heartbeat: string
   host: string
-  pid: number
+  pid?: number | null
   pending_command: string | null
   is_quarantined: boolean
 }

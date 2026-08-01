@@ -67,7 +67,8 @@ class KnowledgeBase:
                         COUNT(*) FILTER (WHERE status='completed') AS completed,
                         COUNT(*) FILTER (WHERE status='failed')    AS failed,
                         SUM(rows_processed)                        AS total_rows,
-                        AVG(duration_ms)                           AS avg_chunk_ms
+                        AVG(duration_ms)                           AS avg_chunk_ms,
+                        COUNT(DISTINCT worker_id) FILTER (WHERE worker_id IS NOT NULL) AS distinct_workers
                     FROM migration_chunks WHERE job_id=:jid
                 """),
                 {"jid": job_id}
@@ -98,13 +99,16 @@ class KnowledgeBase:
                 ).fetchall()
                 errors = [r[0] for r in err_rows if r[0]]
 
+            src = self._engine_of(j.get("source_config"))
+            tgt = self._engine_of(j.get("target_config"))
+
             content = {
                 "job_id":          job_id,
                 "status":          j.get("status"),
-                "source_engine":   j.get("source_engine"),
-                "target_engine":   j.get("target_engine"),
-                "worker_count":    j.get("worker_count", 4),
-                "chunk_strategy":  j.get("chunk_strategy", "size_based"),
+                "source_engine":   src,
+                "target_engine":   tgt,
+                "worker_count":    int(s.get("distinct_workers") or 0),
+                "chunk_strategy":  "unknown",  # not tracked per-job in the real schema
                 "total_rows":      int(s.get("total_rows") or 0),
                 "duration_seconds": duration_s,
                 "success_rate":    round(int(s.get("completed") or 0) /
@@ -115,8 +119,6 @@ class KnowledgeBase:
                 "lessons_learned": self._extract_lessons(j, s, errors),
             }
 
-            src = j.get("source_engine", "unknown")
-            tgt = j.get("target_engine", "unknown")
             title = (f"{src}→{tgt} migration: "
                      f"{int(s.get('total_rows') or 0):,} rows, "
                      f"status={j.get('status')}")
@@ -431,12 +433,12 @@ class KnowledgeBase:
         lessons = []
         total    = int(stats.get("total_chunks") or 0)
         failed   = int(stats.get("failed") or 0)
-        workers  = job.get("worker_count", 4)
-        strategy = job.get("chunk_strategy", "size_based")
+        workers  = int(stats.get("distinct_workers") or 0)
 
         if job.get("status") == "completed" and failed == 0:
             lessons.append(
-                f"{workers} workers with {strategy} chunks worked well for this scenario."
+                f"{workers} worker(s) completed this migration with zero chunk failures."
+                if workers else "This migration completed with zero chunk failures."
             )
         if failed > 0:
             fail_pct = round(failed / max(total, 1) * 100, 1)
