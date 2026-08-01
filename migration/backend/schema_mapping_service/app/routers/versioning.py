@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.comparison.schema_comparator import SchemaComparator
 from backend.schema_mapping_service.app.repositories.mapping_repository import MappingRepository
 
@@ -27,13 +28,25 @@ repo       = MappingRepository()
 comparator = SchemaComparator()
 
 
+def _owned_schema(db: Session, schema_id: str, user: CurrentUser) -> dict:
+    version = repo.get_schema_version(db, schema_id)
+    if not version:
+        raise HTTPException(status_code=404, detail=f"Schema {schema_id} not found")
+    if not user.can("*") and version.get("tenant_id") != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Schema {schema_id} not found")
+    return version
+
+
 class CompareVersionsRequest(BaseModel):
     version_id_before: str
     version_id_after:  str
 
 
 @router.get("/schemas/versions/list", summary="List all schema versions grouped by name")
-def list_all_versions(tenant_id: str = "local", db: Session = Depends(get_db)):
+def list_all_versions(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Returns all saved schema versions grouped by schema name.
     Each entry shows the version label, source type, table count, and when it was created.
@@ -48,7 +61,7 @@ def list_all_versions(tenant_id: str = "local", db: Session = Depends(get_db)):
             WHERE tenant_id = :tid
             ORDER BY name, created_at DESC
         """),
-        {"tid": tenant_id}
+        {"tid": user.tenant_id}
     ).fetchall()
 
     grouped = {}
@@ -65,7 +78,11 @@ def list_all_versions(tenant_id: str = "local", db: Session = Depends(get_db)):
 
 
 @router.post("/schemas/compare-versions", summary="Compare two versions of a schema")
-def compare_versions(req: CompareVersionsRequest, db: Session = Depends(get_db)):
+def compare_versions(
+    req: CompareVersionsRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Compares two saved schema versions (typically before and after a change)
     and returns the full structured diff.
@@ -78,13 +95,8 @@ def compare_versions(req: CompareVersionsRequest, db: Session = Depends(get_db))
     Returns the same diff format as POST /compare but scoped to two
     specific saved versions rather than the current source/target schemas.
     """
-    before = repo.get_schema_version(db, req.version_id_before)
-    after  = repo.get_schema_version(db, req.version_id_after)
-
-    if not before:
-        raise HTTPException(status_code=404, detail=f"Version {req.version_id_before} not found")
-    if not after:
-        raise HTTPException(status_code=404, detail=f"Version {req.version_id_after} not found")
+    before = _owned_schema(db, req.version_id_before, user)
+    after  = _owned_schema(db, req.version_id_after, user)
 
     diff = comparator.compare(
         source_schema=before["schema_data"],
@@ -109,7 +121,11 @@ def compare_versions(req: CompareVersionsRequest, db: Session = Depends(get_db))
 
 
 @router.get("/schemas/{schema_id}/changelog", summary="Get human-readable changelog for a schema")
-def get_changelog(schema_id: str, db: Session = Depends(get_db)):
+def get_changelog(
+    schema_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """
     Compares this schema version against the previous version with the same name
     and returns a human-readable changelog.
@@ -124,9 +140,7 @@ def get_changelog(schema_id: str, db: Session = Depends(get_db)):
       ]
     }
     """
-    current = repo.get_schema_version(db, schema_id)
-    if not current:
-        raise HTTPException(status_code=404, detail=f"Schema {schema_id} not found")
+    current = _owned_schema(db, schema_id, user)
 
     # Find the previous version with the same name
     prev_row = db.execute(

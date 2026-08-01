@@ -135,8 +135,8 @@ class ReportGenerator:
         table_stats = db.execute(
             text("""
                 SELECT table_name, status, total_chunks, completed_chunks,
-                       total_rows, migration_order
-                FROM migration_tables WHERE job_id=:jid ORDER BY migration_order
+                       total_rows, execution_order
+                FROM migration_tables WHERE job_id=:jid ORDER BY execution_order
             """),
             {"jid": job_id}
         ).fetchall()
@@ -156,8 +156,8 @@ class ReportGenerator:
         return {
             "job_id":      job_id,
             "status":      j.get("status"),
-            "source":      j.get("source_engine", "unknown"),
-            "target":      j.get("target_engine", "unknown"),
+            "source":      self._engine_of(j.get("source_config")),
+            "target":      self._engine_of(j.get("target_config")),
             "started_at":  started,
             "completed_at": completed,
             "duration_seconds": duration_s,
@@ -262,7 +262,7 @@ class ReportGenerator:
 
         approvals = db.execute(
             text("""
-                SELECT approver_id, status, requested_at, reviewed_at, comments
+                SELECT reviewed_by_id, status, requested_at, reviewed_at, notes
                 FROM migration_approvals WHERE job_id=:jid
             """),
             {"jid": job_id}
@@ -312,8 +312,8 @@ class ReportGenerator:
         """Audit trail for compliance reporting (GDPR/HIPAA/SOC2)."""
         audit_logs = db.execute(
             text("""
-                SELECT user_id, user_email, action, resource_type, resource_id,
-                       result, ip_address, created_at
+                SELECT user_id, action, resource_type, resource_id,
+                       status, ip_address, created_at
                 FROM audit_logs
                 WHERE resource_id=:jid OR resource_id IN (
                     SELECT id::text FROM migration_chunks WHERE job_id=:jid
@@ -369,6 +369,18 @@ class ReportGenerator:
             if hasattr(v, "hex"):        d[k] = str(v)
             if hasattr(v, "isoformat"):  d[k] = v.isoformat()
         return d
+
+    def _engine_of(self, config) -> str:
+        """source_config/target_config are JSONB with an "engine" key -
+        migration_jobs itself has no source_engine/target_engine columns."""
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except Exception:
+                return "unknown"
+        if isinstance(config, dict):
+            return config.get("engine", "unknown")
+        return "unknown"
 
     def _fmt(self, seconds: int) -> str:
         if not seconds or seconds <= 0: return "< 1 minute"

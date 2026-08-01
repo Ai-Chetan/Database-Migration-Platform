@@ -11,6 +11,19 @@ Endpoints:
     POST /table-mappings/{mid}/column-mappings/bulk   → bulk save
     GET  /table-mappings/{mid}/column-mappings        → list column mappings
     DELETE /column-mappings/{cid}                     → delete column mapping
+
+CHANGES IN THIS VERSION (Stage 1 audit fix):
+  Same architectural gap as everywhere else in Phase B: zero
+  authentication, and no tenant ownership check at any level - table
+  mappings and column mappings could be created/read/deleted by any
+  authenticated user regardless of which tenant's project they actually
+  belonged to. delete_table_mapping/delete_column_mapping didn't even
+  check the resource existed before deleting.
+
+  schema_table_mappings and schema_column_mappings have no tenant_id
+  column of their own (by design - they're scoped through their parent
+  mapping_projects row instead), so ownership is enforced by tracing
+  column_mapping -> table_mapping -> project -> tenant_id.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +31,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.repositories.mapping_repository import MappingRepository
 from backend.schema_mapping_service.app.datatype.type_engine import DataTypeEngine
 from backend.schema_mapping_service.app.schemas.schemas import (
@@ -28,13 +42,31 @@ router = APIRouter(tags=["Table & Column Mappings"])
 repo   = MappingRepository()
 
 
+def _owned_project(db: Session, project_id: str, user: CurrentUser) -> dict:
+    project = repo.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    if not user.can("*") and project.get("tenant_id") != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return project
+
+
+def _owned_table_mapping(db: Session, table_mapping_id: str, user: CurrentUser) -> dict:
+    tm = repo.get_table_mapping(db, table_mapping_id)
+    if not tm:
+        raise HTTPException(status_code=404, detail=f"Table mapping {table_mapping_id} not found")
+    _owned_project(db, tm["project_id"], user)   # 404s if not caller's tenant
+    return tm
+
+
 # ── Table Mappings ────────────────────────────────────────────────────────────
 
 @router.post("/projects/{project_id}/table-mappings", summary="Create table mapping")
 def create_table_mapping(
     project_id: str,
     req: CreateTableMappingRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
 ):
     """
     Create a mapping between source and target tables.
@@ -44,22 +76,8 @@ def create_table_mapping(
       - split:  one source table → multiple target tables
       - merge:  multiple source tables → one target table
       - graph:  many-to-many (complex enterprise migrations)
-
-    Example single:
-      source_tables: ["users"],  target_tables: ["customers"]
-
-    Example split:
-      source_tables: ["customer"],
-      target_tables: ["customer", "customer_address", "customer_contact"]
-
-    Example merge:
-      source_tables: ["users", "user_profile", "user_settings"],
-      target_tables: ["customer_master"],
-      join_condition: "LEFT JOIN user_profile ON users.id = user_profile.user_id ..."
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    _owned_project(db, project_id, user)
 
     return repo.save_table_mapping(
         db=db,
@@ -73,15 +91,25 @@ def create_table_mapping(
 
 
 @router.get("/projects/{project_id}/table-mappings", summary="List table mappings for project")
-def list_table_mappings(project_id: str, db: Session = Depends(get_db)):
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+def list_table_mappings(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
+    _owned_project(db, project_id, user)
     return repo.list_table_mappings(db, project_id)
 
 
 @router.delete("/projects/{project_id}/table-mappings/{mapping_id}", summary="Delete table mapping")
-def delete_table_mapping(project_id: str, mapping_id: str, db: Session = Depends(get_db)):
+def delete_table_mapping(
+    project_id: str, mapping_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
+    _owned_project(db, project_id, user)
+    tm = repo.get_table_mapping(db, mapping_id)
+    if not tm or tm.get("project_id") != project_id:
+        raise HTTPException(status_code=404, detail=f"Table mapping {mapping_id} not found")
     repo.delete_table_mapping(db, mapping_id)
     return {"deleted": mapping_id}
 
@@ -92,7 +120,8 @@ def delete_table_mapping(project_id: str, mapping_id: str, db: Session = Depends
 def create_column_mapping(
     table_mapping_id: str,
     req: CreateColumnMappingRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
 ):
     """
     Map one source column to one target column.
@@ -102,16 +131,13 @@ def create_column_mapping(
       - rename:     copy from source_column → target_column (different names)
       - transform:  apply Python expression: {"expression": "row['val'] * 100"}
       - constant:   always write a fixed value: {"value": "India"}
-      - expression: compute from multiple columns: {"expression": "row['first_name'] + ' ' + row['last_name']"}
-      - lookup:     look up in another table: {"table": "country_master", "key_col": "code", "value_col": "id"}
+      - expression: compute from multiple columns
+      - lookup:     look up in another table
 
     If conversion_safety is not provided, the type engine computes it automatically.
     """
-    tm = repo.get_table_mapping(db, table_mapping_id)
-    if not tm:
-        raise HTTPException(status_code=404, detail=f"Table mapping {table_mapping_id} not found")
+    _owned_table_mapping(db, table_mapping_id, user)
 
-    # Auto-compute conversion safety if not provided
     safety      = req.conversion_safety
     requires_cast = req.requires_cast
     cast_expr   = req.cast_expression
@@ -145,20 +171,18 @@ def create_column_mapping(
 def bulk_column_mappings(
     table_mapping_id: str,
     req: BulkColumnMappingRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
 ):
     """
     Save multiple column mappings in one call.
     Used after accepting recommendations to bulk-create all accepted mappings.
     """
-    tm = repo.get_table_mapping(db, table_mapping_id)
-    if not tm:
-        raise HTTPException(status_code=404, detail=f"Table mapping {table_mapping_id} not found")
+    _owned_table_mapping(db, table_mapping_id, user)
 
     engine = DataTypeEngine(db=db)
     mappings = []
     for m in req.mappings:
-        # Auto-compute safety
         safety, requires_cast, cast_expr = m.conversion_safety, m.requires_cast, m.cast_expression
         if not safety and m.source_type and m.target_type:
             col_ref = f"`{m.source_table}`.`{m.source_column}`"
@@ -184,11 +208,24 @@ def bulk_column_mappings(
 
 
 @router.get("/table-mappings/{table_mapping_id}/column-mappings", summary="List column mappings")
-def list_column_mappings(table_mapping_id: str, db: Session = Depends(get_db)):
+def list_column_mappings(
+    table_mapping_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
+    _owned_table_mapping(db, table_mapping_id, user)
     return repo.list_column_mappings(db, table_mapping_id)
 
 
 @router.delete("/column-mappings/{col_mapping_id}", summary="Delete column mapping")
-def delete_column_mapping(col_mapping_id: str, db: Session = Depends(get_db)):
+def delete_column_mapping(
+    col_mapping_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
+    cm = repo.get_column_mapping(db, col_mapping_id)
+    if not cm:
+        raise HTTPException(status_code=404, detail=f"Column mapping {col_mapping_id} not found")
+    _owned_table_mapping(db, cm["table_mapping_id"], user)   # 404s if not caller's tenant
     repo.delete_column_mapping(db, col_mapping_id)
     return {"deleted": col_mapping_id}

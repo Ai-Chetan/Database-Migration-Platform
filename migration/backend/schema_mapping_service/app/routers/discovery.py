@@ -8,6 +8,15 @@ Endpoints:
     GET  /schemas                 → list all saved schema versions
     GET  /schemas/{id}            → get one schema version (full data)
     GET  /schemas/{id}/tables     → list table names only
+
+CHANGES IN THIS VERSION (Stage 1 audit fix):
+  Same architectural gap as the rest of Phase B: zero authentication on
+  an endpoint that accepts raw database credentials in the request body
+  and connects to a live database (discover_schema) - and no ownership
+  check on get_schema/list_schema_tables, so any authenticated user could
+  read another tenant's full discovered schema (table/column names,
+  row counts) by guessing a UUID. tenant_id now comes from the
+  authenticated user, not a client-supplied request field.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +24,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.discovery.schema_discovery import (
     SchemaDiscovery, parse_schema_file
 )
@@ -27,8 +37,21 @@ router = APIRouter(prefix="/schemas", tags=["Schema Discovery"])
 repo   = MappingRepository()
 
 
+def _owned_schema(db: Session, schema_id: str, user: CurrentUser) -> dict:
+    version = repo.get_schema_version(db, schema_id)
+    if not version:
+        raise HTTPException(status_code=404, detail=f"Schema {schema_id} not found")
+    if not user.can("*") and version.get("tenant_id") != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Schema {schema_id} not found")
+    return version
+
+
 @router.post("/discover", summary="Discover schema from a live database")
-def discover_schema(req: DiscoverRequest, db: Session = Depends(get_db)):
+def discover_schema(
+    req: DiscoverRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Connect to a live database and discover its full schema.
     Saves the result as a new schema version in the metadata DB.
@@ -54,7 +77,7 @@ def discover_schema(req: DiscoverRequest, db: Session = Depends(get_db)):
 
     version = repo.save_schema_version(
         db=db,
-        tenant_id=req.tenant_id,
+        tenant_id=user.tenant_id,
         name=req.name,
         db_type=req.config.get("engine", "unknown"),
         schema_data=schema_data,
@@ -67,7 +90,11 @@ def discover_schema(req: DiscoverRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/import-file", summary="Import schema from text file content")
-def import_schema_file(req: FileImportRequest, db: Session = Depends(get_db)):
+def import_schema_file(
+    req: FileImportRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Parse a plain-text schema file (original tool format) and save it.
 
@@ -91,7 +118,7 @@ def import_schema_file(req: FileImportRequest, db: Session = Depends(get_db)):
 
     version = repo.save_schema_version(
         db=db,
-        tenant_id=req.tenant_id,
+        tenant_id=user.tenant_id,
         name=req.name,
         db_type="file",
         schema_data=schema_data,
@@ -103,9 +130,12 @@ def import_schema_file(req: FileImportRequest, db: Session = Depends(get_db)):
     return version
 
 
-@router.get("", summary="List all saved schema versions")
-def list_schemas(tenant_id: str = "local", db: Session = Depends(get_db)):
-    versions = repo.list_schema_versions(db, tenant_id)
+@router.get("", summary="List saved schema versions for your tenant")
+def list_schemas(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
+    versions = repo.list_schema_versions(db, user.tenant_id)
     for v in versions:
         v["table_count"] = len(v.get("schema_data", {}).get("tables", {}))
         v.pop("schema_data", None)   # Don't return full schema in list
@@ -113,19 +143,23 @@ def list_schemas(tenant_id: str = "local", db: Session = Depends(get_db)):
 
 
 @router.get("/{schema_id}", summary="Get full schema version")
-def get_schema(schema_id: str, db: Session = Depends(get_db)):
-    version = repo.get_schema_version(db, schema_id)
-    if not version:
-        raise HTTPException(status_code=404, detail=f"Schema {schema_id} not found")
+def get_schema(
+    schema_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
+    version = _owned_schema(db, schema_id, user)
     version["table_count"] = len(version.get("schema_data", {}).get("tables", {}))
     return version
 
 
 @router.get("/{schema_id}/tables", summary="List table names in a schema")
-def list_schema_tables(schema_id: str, db: Session = Depends(get_db)):
-    version = repo.get_schema_version(db, schema_id)
-    if not version:
-        raise HTTPException(status_code=404, detail=f"Schema {schema_id} not found")
+def list_schema_tables(
+    schema_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
+    version = _owned_schema(db, schema_id, user)
 
     schema_data = version.get("schema_data", {})
     tables = []

@@ -16,12 +16,23 @@ Operations:
 
 import datetime
 import json
+import uuid
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from backend.shared.config.redis import redis_client
 from backend.shared.config.logging import logger
+
+
+def _as_uuid_or_none(value):
+    """operations_actions.tenant_id / .operator_id are UUID columns."""
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 class ChunkControl:
@@ -226,11 +237,11 @@ class ChunkControl:
         row = db.execute(
             text("""
                 SELECT mc.*, mt.table_name,
-                       wh.status AS worker_status,
+                       wh.worker_status AS worker_status,
                        wh.last_heartbeat AS worker_heartbeat
                 FROM migration_chunks mc
                 LEFT JOIN migration_tables mt ON mc.table_id = mt.id
-                LEFT JOIN worker_heartbeats wh ON mc.worker_id = wh.worker_id
+                LEFT JOIN worker_heartbeats wh ON mc.worker_id = wh.worker_name
                 WHERE mc.id = :id
             """),
             {"id": chunk_id}
@@ -313,7 +324,8 @@ class ChunkControl:
                          :rid, :before::jsonb, :after::jsonb, :reason, :now)
                 """),
                 {
-                    "tid":    tenant_id, "op":     operator,
+                    "tid":    _as_uuid_or_none(tenant_id),
+                    "op":     _as_uuid_or_none(operator),
                     "atype":  action_type, "rtype": resource_type,
                     "rid":    resource_id,
                     "before": json.dumps(before, default=str),

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.recommendation_engine.recommender import RecommendationEngine
 from backend.schema_mapping_service.app.repositories.mapping_repository import MappingRepository
 from backend.schema_mapping_service.app.datatype.type_engine import DataTypeEngine
@@ -25,8 +26,21 @@ repo   = MappingRepository()
 engine = RecommendationEngine()
 
 
+def _owned_project(db: Session, project_id: str, user: CurrentUser) -> dict:
+    project = repo.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    if not user.can("*") and project.get("tenant_id") != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return project
+
+
 @router.post("/{project_id}/recommend", summary="Run recommendation engine for a project")
-def run_recommendations(project_id: str, db: Session = Depends(get_db)):
+def run_recommendations(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Runs the intelligent recommendation engine to auto-suggest:
       - Table matches (exact, fuzzy, alias)
@@ -39,9 +53,7 @@ def run_recommendations(project_id: str, db: Session = Depends(get_db)):
     The user reviews these in the UI and accepts/rejects each one.
     Accepted ones become actual table/column mappings via /apply.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])
@@ -67,10 +79,12 @@ def run_recommendations(project_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{project_id}/recommendations", summary="List saved recommendations")
-def list_recommendations(project_id: str, db: Session = Depends(get_db)):
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+def list_recommendations(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
+    _owned_project(db, project_id, user)
     recs = repo.list_recommendations(db, project_id)
     for r in recs:
         r["id"] = f"{r['source_ref']}→{r['target_ref']}"
@@ -81,13 +95,15 @@ def list_recommendations(project_id: str, db: Session = Depends(get_db)):
 def accept_recommendations(
     project_id: str,
     req: AcceptRecommendationsRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
 ):
     """
     Mark recommendations as accepted.
     rec_ids format: ["users→customers", "users.first_name→customers.fname"]
     Call /apply afterwards to convert them into actual mappings.
     """
+    _owned_project(db, project_id, user)
     repo.accept_recommendations(db, project_id, req.rec_ids)
     return {"accepted": len(req.rec_ids), "rec_ids": req.rec_ids}
 
@@ -96,14 +112,20 @@ def accept_recommendations(
 def reject_recommendations(
     project_id: str,
     req: AcceptRecommendationsRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
 ):
+    _owned_project(db, project_id, user)
     repo.reject_recommendations(db, project_id, req.rec_ids)
     return {"rejected": len(req.rec_ids), "rec_ids": req.rec_ids}
 
 
 @router.post("/{project_id}/recommendations/apply", summary="Apply accepted recommendations as mappings")
-def apply_recommendations(project_id: str, db: Session = Depends(get_db)):
+def apply_recommendations(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Converts all accepted recommendations into actual table and column mappings.
 
@@ -115,9 +137,7 @@ def apply_recommendations(project_id: str, db: Session = Depends(get_db)):
 
     Returns counts of what was created.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])

@@ -12,12 +12,22 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.migration_generator.plan_generator import MigrationPlanGenerator
 from backend.schema_mapping_service.app.repositories.mapping_repository import MappingRepository
 
 router    = APIRouter(prefix="/projects", tags=["Dry Run & Planning"])
 repo      = MappingRepository()
 generator = MigrationPlanGenerator()
+
+
+def _owned_project(db: Session, project_id: str, user: CurrentUser) -> dict:
+    project = repo.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    if not user.can("*") and project.get("tenant_id") != user.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return project
 
 
 def _build_table_mappings_dict(db, project_id: str, src_schema: dict, tgt_schema: dict) -> dict:
@@ -58,7 +68,11 @@ def _build_table_mappings_dict(db, project_id: str, src_schema: dict, tgt_schema
 
 
 @router.post("/{project_id}/dry-run", summary="Analyze migration risk before executing")
-def dry_run(project_id: str, db: Session = Depends(get_db)):
+def dry_run(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Runs a full risk analysis without moving any data.
 
@@ -76,9 +90,7 @@ def dry_run(project_id: str, db: Session = Depends(get_db)):
 
     Result is also saved to mapping_projects.dry_run_result for later retrieval.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     src_version = repo.get_schema_version(db, project["source_schema_id"])
     tgt_version = repo.get_schema_version(db, project["target_schema_id"])
@@ -104,7 +116,11 @@ def dry_run(project_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{project_id}/plan", summary="Generate ordered migration execution plan")
-def generate_plan(project_id: str, db: Session = Depends(get_db)):
+def generate_plan(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:write")),
+):
     """
     Generates a step-by-step execution plan for the migration.
 
@@ -122,9 +138,7 @@ def generate_plan(project_id: str, db: Session = Depends(get_db)):
     Requires dry-run to have been run first.
     Plan is saved to mapping_projects.migration_plan.
     """
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     # Run dry-run first if not already done
     dry_run_result = project.get("dry_run_result")
@@ -175,11 +189,13 @@ def generate_plan(project_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{project_id}/plan", summary="Get saved migration plan")
-def get_plan(project_id: str, db: Session = Depends(get_db)):
+def get_plan(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_permission("schema:read")),
+):
     """Get the previously generated migration plan for a project."""
-    project = repo.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    project = _owned_project(db, project_id, user)
 
     plan = project.get("migration_plan")
     if not plan:

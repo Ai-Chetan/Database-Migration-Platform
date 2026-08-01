@@ -52,7 +52,7 @@ export function WorkerFleetGrid({ workers }: { workers: Worker[] }) {
         <div className="mt-4 flex items-center gap-4 border-t border-slate-700/60 pt-3 text-tiny">
           <span className="mono text-white">{hovered.worker_id}</span>
           <span className="text-sidebar-text">{hovered.host}</span>
-          <span className="text-sidebar-text">pid {hovered.pid}</span>
+          {hovered.pid != null && <span className="text-sidebar-text">pid {hovered.pid}</span>}
           {hovered.current_job_id && (
             <span className="mono text-sidebar-text">job {hovered.current_job_id.slice(0, 8)}</span>
           )}
