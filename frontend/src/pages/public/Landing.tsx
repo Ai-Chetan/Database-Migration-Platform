@@ -119,7 +119,7 @@ export default function Landing() {
                 Log in
               </Button>
             </Link>
-            <Link to="/login">
+            <Link to="/register">
               <Button size="sm">Get started</Button>
             </Link>
           </div>
@@ -143,7 +143,7 @@ export default function Landing() {
               enterprise price tag.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Link to="/login">
+              <Link to="/register">
                 <Button size="lg" rightIcon={<ArrowRight className="h-4 w-4" />}>
                   Start migrating
                 </Button>
@@ -238,7 +238,7 @@ export default function Landing() {
                     </li>
                   ))}
                 </ul>
-                <Link to="/login" className="mt-8">
+                <Link to="/register" className="mt-8">
                   <Button className="w-full" variant={tier.highlighted ? 'primary' : 'secondary'}>
                     Choose {tier.name}
                   </Button>

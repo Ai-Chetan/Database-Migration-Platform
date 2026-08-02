@@ -94,12 +94,26 @@ export function ConnectionFormDrawer({ isOpen, onClose, connection }: Props) {
       onClose()
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.detail || 'Failed to save connection')
+      console.log("STATUS:", err.response?.status);
+      console.log("DATA:", err.response?.data);
+      console.log(JSON.stringify(err.response?.data, null, 2));
+      console.table(err.response?.data.detail);
+
+      const detail = err.response?.data?.detail;
+
+      toast.error(
+        Array.isArray(detail)
+          ? detail.map((e: any) => e.msg).join(", ")
+          : String(detail)
+      );
     },
   })
 
-  const onSubmit = (values: FormValues) => saveMutation.mutate(values)
-
+const onSubmit = (values: FormValues) => {
+  console.log("Submitting JSON:");
+  console.log(JSON.stringify(values, null, 2));
+  saveMutation.mutate(values);
+};
   return (
     <Drawer
       isOpen={isOpen}
@@ -111,7 +125,16 @@ export function ConnectionFormDrawer({ isOpen, onClose, connection }: Props) {
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit(onSubmit)} isLoading={saveMutation.isPending}>
+          <Button
+            onClick={() => {
+              console.log("Button clicked");
+              handleSubmit(
+                onSubmit,
+                (errors) => console.log("Validation errors:", errors)
+              )();
+            }}
+            isLoading={saveMutation.isPending}
+          >
             {isEdit ? 'Save changes' : 'Create connection'}
           </Button>
         </>

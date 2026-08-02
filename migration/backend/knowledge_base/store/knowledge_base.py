@@ -413,7 +413,7 @@ class KnowledgeBase:
                      entry_type, title, content, tags, created_at, updated_at)
                 VALUES
                     (:id, :tid, :jid, :src, :tgt,
-                     :etype, :title, :content::jsonb, :tags, :now, :now)
+                     :etype, :title, CAST(:content AS jsonb), :tags, :now, :now)
             """),
             {
                 "id":      eid, "tid": tenant_id, "jid": job_id,

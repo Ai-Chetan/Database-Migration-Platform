@@ -4,7 +4,11 @@ import { Worker, DriftEvent, TuningAction } from '@/types'
 export const operationsApi = {
   // Workers
   listWorkers: (jobId?: string) =>
-    apiClient.get<Worker[]>('/ops/workers', { params: jobId ? { job_id: jobId } : {} }).then((r) => r.data),
+  apiClient
+    .get<{ workers: Worker[]; total: number }>('/ops/workers', {
+      params: jobId ? { job_id: jobId } : {},
+    })
+    .then((r) => r.data.workers),
   pauseWorker: (workerId: string) => apiClient.post(`/ops/workers/${workerId}/pause`),
   resumeWorker: (workerId: string) => apiClient.post(`/ops/workers/${workerId}/resume`),
   quarantineWorker: (workerId: string) => apiClient.post(`/ops/workers/${workerId}/quarantine`),

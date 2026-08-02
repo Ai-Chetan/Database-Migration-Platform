@@ -524,7 +524,7 @@ class WorkflowExecutor:
                         status=:s, completed_at=:now, duration_ms=:dur,
                         rows_read=:rr, rows_written=:rw, rows_skipped=:rs,
                         error_message=:err, error_node=:enode,
-                        context_snapshot=:snap::jsonb
+                        context_snapshot=CAST(:snap AS jsonb)
                     WHERE id=:id
                 """),
                 {

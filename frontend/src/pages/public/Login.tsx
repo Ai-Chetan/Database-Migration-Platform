@@ -24,7 +24,7 @@ export default function Login() {
   } = useForm<FormValues>({ resolver: zodResolver(schema) })
 
   const onSubmit = (values: FormValues) => {
-    login({ username: values.email, password: values.password })
+    login(values.email, values.password)
   }
 
   return (
@@ -77,6 +77,13 @@ export default function Login() {
               Log in
             </Button>
           </form>
+
+          <p className="mt-6 text-center text-small text-text-secondary">
+            Don't have a workspace?{' '}
+            <Link to="/register" className="font-medium text-action hover:underline">
+              Create one
+            </Link>
+          </p>
         </div>
 
         <p className="text-center text-tiny text-text-tertiary lg:text-left">

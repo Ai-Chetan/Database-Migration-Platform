@@ -343,7 +343,7 @@ class DependencyGraphExecutor:
                             (id, job_id, table_name, depends_on, depth_level,
                              execution_order, can_parallel, status, created_at)
                         VALUES
-                            (:id, :jid, :tname, :deps::jsonb, :depth,
+                            (:id, :jid, :tname, CAST(:deps AS jsonb), :depth,
                              :order, :parallel, 'pending', :now)
                     """),
                     {
@@ -366,7 +366,7 @@ class DependencyGraphExecutor:
                     text("""
                         UPDATE migration_tables
                         SET depth_level = :depth, execution_order = :order,
-                            depends_on = :deps::jsonb
+                            depends_on = CAST(:deps AS jsonb)
                         WHERE job_id = :jid AND table_name = :tname
                     """),
                     {

@@ -61,9 +61,9 @@ class TemplateService:
                 VALUES
                     (:id, :tid, :name, :desc,
                      :sdb, :tdb,
-                     :tmaps::jsonb, :cconf::jsonb,
-                     :vrules::jsonb, :econf::jsonb,
-                     :tags::jsonb, :pub, 0,
+                     CAST(:tmaps AS jsonb), CAST(:cconf AS jsonb),
+                     CAST(:vrules AS jsonb), CAST(:econf AS jsonb),
+                     CAST(:tags AS jsonb), :pub, 0,
                      :by, :now, :now)
             """),
             {
@@ -148,7 +148,7 @@ class TemplateService:
                                 (id, project_id, mapping_type, source_tables,
                                  target_tables, created_at, updated_at)
                             VALUES
-                                (:id, :pid, 'single', :src::jsonb, :tgt::jsonb, :now, :now)
+                                (:id, :pid, 'single', CAST(:src AS jsonb), CAST(:tgt AS jsonb), :now, :now)
                             ON CONFLICT DO NOTHING
                         """),
                         {

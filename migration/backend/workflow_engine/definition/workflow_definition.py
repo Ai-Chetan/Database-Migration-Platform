@@ -124,12 +124,12 @@ class WorkflowDefinitionRepository:
                      nodes, edges, is_default, is_active, created_at, updated_at)
                 VALUES
                     (:id, :tid, :name, :ver, :desc,
-                     :nodes::jsonb, :edges::jsonb, :is_def, TRUE, :now, :now)
+                     CAST(:nodes AS jsonb), CAST(:edges AS jsonb), :is_def, TRUE, :now, :now)
                 ON CONFLICT (tenant_id, name, version)
                 DO UPDATE SET
                     description = :desc,
-                    nodes       = :nodes::jsonb,
-                    edges       = :edges::jsonb,
+                    nodes       = CAST(:nodes AS jsonb),
+                    edges       = CAST(:edges AS jsonb),
                     is_default  = :is_def,
                     updated_at  = :now
                 RETURNING id

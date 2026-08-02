@@ -209,7 +209,7 @@ def add_rule(
         text("""
             INSERT INTO masking_rules
                 (id, rule_set_id, table_name, column_name, strategy, strategy_config, created_at)
-            VALUES (:id, :rsid, :tname, :col, :strat, :config::jsonb, :now)
+            VALUES (:id, :rsid, :tname, :col, :strat, CAST(:config AS jsonb), :now)
         """),
         {
             "id":     rid,

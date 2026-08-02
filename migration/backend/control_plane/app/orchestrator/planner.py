@@ -13,7 +13,7 @@ class Planner:
         logger.info("Generating chunks", job_id=job_id, table_id=table_id, total_rows=total_rows)
         # Using a simple 1 to total_rows assumption for MVP PK range
         chunks = generate_pk_chunks(1, total_rows, chunk_size)
-        
+
         chunks_data = []
         for min_pk, max_pk in chunks:
             chunks_data.append({
@@ -22,9 +22,14 @@ class Planner:
                 "pk_start": min_pk,
                 "pk_end": max_pk,
                 "status": "pending",
-                "table_name": table_name
+                # NOTE: no "table_name" key here - migration_chunks has no such
+                # column (table_name lives on migration_tables, joined via
+                # table_id). Passing it through **data into the MigrationChunk
+                # constructor would raise "unexpected keyword argument" the
+                # first time this ran - this method had never actually been
+                # called from anywhere until this fix wired it up.
             })
-            
+
         created_chunks = self.chunk_repo.bulk_create_chunks(db, chunks_data)
         
         # Publish chunks

@@ -456,8 +456,8 @@ class AssessmentEngine:
                          :complexity, :risk, :tables, :rows,
                          :size_gb, :duration,
                          :workers, :chunk_strat,
-                         :blocking::jsonb, :warnings::jsonb, :recs::jsonb,
-                         :breakdown::jsonb, :full::jsonb, :now)
+                         CAST(:blocking AS jsonb), CAST(:warnings AS jsonb), CAST(:recs AS jsonb),
+                         CAST(:breakdown AS jsonb), CAST(:full AS jsonb), :now)
                 """),
                 {
                     "tid":        tenant_id,

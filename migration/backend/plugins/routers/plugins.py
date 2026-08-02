@@ -344,7 +344,7 @@ def configure_policy(req: ConfigurePolicyRequest, db: Session = Depends(get_db))
     db.execute(
         text("""
             INSERT INTO policy_rules (id, tenant_id, name, policy_type, config, is_active, created_at)
-            VALUES (:id, :tid, :name, :ptype, :config::jsonb, :active, :now)
+            VALUES (:id, :tid, :name, :ptype, CAST(:config AS jsonb), :active, :now)
             ON CONFLICT DO NOTHING
         """),
         {

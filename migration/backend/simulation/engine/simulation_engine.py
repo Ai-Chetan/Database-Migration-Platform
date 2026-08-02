@@ -577,7 +577,7 @@ class SimulationEngine:
                          :rps, :mbps,
                          :cpu, :net_gb,
                          :storage_gb, :fail_pct,
-                         :bottleneck, :breakdown::jsonb, :recs::jsonb,
+                         :bottleneck, CAST(:breakdown AS jsonb), CAST(:recs AS jsonb),
                          :ds, :now)
                 """),
                 {

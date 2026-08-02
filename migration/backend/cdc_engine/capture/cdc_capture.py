@@ -224,8 +224,8 @@ class CDCCaptureEngine:
                          pk_values, replayed, captured_at)
                     VALUES
                         (:id, :sid, :etype, :tname,
-                         :pos, :before::jsonb, :after::jsonb,
-                         :pk::jsonb, FALSE, :now)
+                         :pos, CAST(:before AS jsonb), CAST(:after AS jsonb),
+                         CAST(:pk AS jsonb), FALSE, :now)
                 """),
                 {
                     "id":     str(uuid.uuid4()),

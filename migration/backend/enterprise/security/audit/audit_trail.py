@@ -81,8 +81,8 @@ class AuditTrail:
                          status, error_msg, created_at)
                     VALUES
                         (:id, :tid, :uid, :action,
-                         :rtype, :rid::uuid,
-                         :old::jsonb, :new::jsonb,
+                         :rtype, CAST(:rid AS uuid),
+                         CAST(:old AS jsonb), CAST(:new AS jsonb),
                          :ip, :ua,
                          :status, :err, :now)
                 """),
@@ -173,7 +173,7 @@ class AuditTrail:
             conditions.append("resource_type = :rtype")
             params["rtype"] = resource_type
         if resource_id:
-            conditions.append("resource_id = :rid::uuid")
+            conditions.append("resource_id = CAST(:rid AS uuid)")
             params["rid"] = resource_id
 
         where = "WHERE " + " AND ".join(conditions) if conditions else ""

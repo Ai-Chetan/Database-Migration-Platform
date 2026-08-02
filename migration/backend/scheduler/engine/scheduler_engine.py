@@ -132,7 +132,7 @@ class SchedulerEngine:
                      require_approval, is_active, next_run_at, created_at, updated_at)
                 VALUES
                     (:id, :tid, :name, :desc, :jtype,
-                     :cron, :tz, :config::jsonb,
+                     :cron, :tz, CAST(:config AS jsonb),
                      :approval, TRUE, :next_run, :now, :now)
             """),
             {
@@ -316,7 +316,7 @@ class SchedulerEngine:
             text("""
                 UPDATE schedule_runs SET
                     status=:status, completed_at=:now,
-                    error_message=:err, result_summary=:result::jsonb
+                    error_message=:err, result_summary=CAST(:result AS jsonb)
                 WHERE id=:id
             """),
             {"status": status, "now": datetime.datetime.utcnow(),

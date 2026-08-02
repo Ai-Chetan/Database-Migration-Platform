@@ -79,8 +79,8 @@ class RollbackEngine:
                     (id, job_id, status, rollback_steps,
                      tables_affected, created_at)
                 VALUES
-                    (:id, :jid, 'ready', :steps::jsonb,
-                     :tables::jsonb, :now)
+                    (:id, :jid, 'ready', CAST(:steps AS jsonb),
+                     CAST(:tables AS jsonb), :now)
             """),
             {
                 "id":     plan_id,

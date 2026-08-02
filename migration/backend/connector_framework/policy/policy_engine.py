@@ -133,7 +133,7 @@ class PolicyEngine:
                 INSERT INTO policy_rules
                     (id, tenant_id, name, policy_type, config, is_active, created_at)
                 VALUES
-                    (:id, :tid, :name, :ptype, :config::jsonb, :active, :now)
+                    (:id, :tid, :name, :ptype, CAST(:config AS jsonb), :active, :now)
             """),
             {
                 "id":     pid,

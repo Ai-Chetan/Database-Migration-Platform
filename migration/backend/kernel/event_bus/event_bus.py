@@ -140,7 +140,7 @@ class EventBus:
                          resource_type, resource_id, payload, correlation_id, published_at)
                     VALUES
                         (:id, :tid, :etype, :svc,
-                         :rtype, :rid, :payload::jsonb, :corr, :now)
+                         :rtype, :rid, CAST(:payload AS jsonb), :corr, :now)
                 """),
                 {
                     "id":      envelope["id"],

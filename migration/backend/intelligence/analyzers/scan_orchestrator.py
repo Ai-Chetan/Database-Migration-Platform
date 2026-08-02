@@ -296,7 +296,7 @@ class ScanOrchestrator:
                 set_parts.append("completed_at=:cat")
                 params["cat"] = completed_at
             if table_results is not None:
-                set_parts.append("table_results=:tr::jsonb")
+                set_parts.append("table_results=CAST(:tr AS jsonb)")
                 params["tr"] = json.dumps(table_results)
             db.execute(
                 text(f"UPDATE intelligence_scan_jobs SET {', '.join(set_parts)} WHERE id=:id"),
@@ -312,7 +312,7 @@ class ScanOrchestrator:
                 text("""
                     UPDATE intelligence_scan_jobs SET
                         tables_scanned=:s, tables_failed=:f,
-                        table_results=:tr::jsonb, updated_at=:now
+                        table_results=CAST(:tr AS jsonb), updated_at=:now
                     WHERE id=:id
                 """),
                 {"s": scanned, "f": failed,

@@ -13,6 +13,7 @@ import NotFound from '@/pages/NotFound'
 
 const Landing = lazy(() => import('@/pages/public/Landing'))
 const Login = lazy(() => import('@/pages/public/Login'))
+const Register = lazy(() => import('@/pages/public/Register'))
 const ForgotPassword = lazy(() => import('@/pages/public/ForgotPassword'))
 
 const Dashboard = lazy(() => import('@/pages/Dashboard'))
@@ -41,6 +42,7 @@ export const router = createBrowserRouter([
     children: [
       { path: '/', element: withSuspense(<Landing />) },
       { path: '/login', element: withSuspense(<Login />) },
+      { path: '/register', element: withSuspense(<Register />) },
       { path: '/forgot-password', element: withSuspense(<ForgotPassword />) },
     ],
   },

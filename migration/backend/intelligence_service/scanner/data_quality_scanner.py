@@ -402,7 +402,7 @@ class DataQualityScanner:
                         VALUES
                             (:id, :tid, :cid, :tname, :ctype,
                              :sev, :cnt, :pct,
-                             :samples::jsonb, :details, :rec, :now)
+                             CAST(:samples AS jsonb), :details, :rec, :now)
                     """),
                     {
                         "id":      str(uuid.uuid4()),

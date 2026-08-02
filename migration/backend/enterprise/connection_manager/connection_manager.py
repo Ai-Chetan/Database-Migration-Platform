@@ -160,7 +160,7 @@ class ConnectionManager:
                     (:id, :tid, :name, :dtype, :host, :port, :dbname,
                      :user, :pwd, :ssl,
                      :pool, :ctimeout, :qtimeout,
-                     :extra::jsonb, :tested_at, :test_status,
+                     CAST(:extra AS jsonb), :tested_at, :test_status,
                      TRUE, :now, :now)
             """),
             {
@@ -338,6 +338,35 @@ class ConnectionManager:
                 "error":   str(e),
                 "connected_to": f"{host}:{port}/{database_name}",
             }
+
+    def update(self, db: Session, connection_id: str, **fields) -> dict:
+        """
+        Update non-secret fields on a connection (name, host, port,
+        database_name, username, ssl_enabled, pool/timeout settings).
+        Password changes go through rotate_password() instead, since that
+        path re-tests the connection before committing.
+        """
+        allowed = {
+            "name", "host", "port", "database_name", "username",
+            "ssl_enabled", "pool_size", "connect_timeout", "query_timeout",
+        }
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return self.get(db, connection_id)
+
+        # pool_size maps to the real column name connection_pool_size
+        col_map = {"pool_size": "connection_pool_size"}
+        set_clause = ", ".join(f"{col_map.get(k, k)} = :{k}" for k in updates)
+        updates["id"] = connection_id
+        updates["now"] = datetime.datetime.utcnow()
+
+        db.execute(
+            text(f"UPDATE connection_registry SET {set_clause}, updated_at = :now WHERE id = :id"),
+            updates
+        )
+        db.commit()
+        logger.info("Connection updated", connection_id=connection_id, fields=list(fields.keys()))
+        return self.get(db, connection_id)
 
     def rotate_password(
         self,
