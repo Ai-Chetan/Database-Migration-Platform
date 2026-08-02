@@ -71,7 +71,7 @@ class ReportGenerator:
                          title, content, generated_by, generated_at)
                     VALUES
                         (:id, :tid, :jid, :rtype, 'json',
-                         :title, :content::jsonb, :by, :now)
+                         :title, CAST(:content AS jsonb), :by, :now)
                 """),
                 {
                     "id":      report_id,

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.schema_mapping_service.app.comparison.schema_comparator import SchemaComparator
 from backend.schema_mapping_service.app.datatype.type_engine import DataTypeEngine
 from backend.schema_mapping_service.app.repositories.mapping_repository import MappingRepository

@@ -38,7 +38,7 @@ class MappingRepository:
                     (id, tenant_id, name, db_type, version_label, schema_data,
                      source_type, notes, created_at)
                 VALUES
-                    (:id, :tid, :name, :db_type, :vlabel, :data::jsonb,
+                    (:id, :tid, :name, :db_type, :vlabel, CAST(:data AS jsonb),
                      :stype, :notes, :now)
             """),
             {
@@ -116,14 +116,14 @@ class MappingRepository:
 
     def save_dry_run_result(self, db: Session, project_id: str, result: dict):
         db.execute(
-            text("UPDATE mapping_projects SET dry_run_result=:r::jsonb, updated_at=:now WHERE id=:id"),
+            text("UPDATE mapping_projects SET dry_run_result=CAST(:r AS jsonb), updated_at=:now WHERE id=:id"),
             {"r": json.dumps(result), "now": datetime.datetime.utcnow(), "id": project_id}
         )
         db.commit()
 
     def save_migration_plan(self, db: Session, project_id: str, plan: dict):
         db.execute(
-            text("UPDATE mapping_projects SET migration_plan=:p::jsonb, updated_at=:now WHERE id=:id"),
+            text("UPDATE mapping_projects SET migration_plan=CAST(:p AS jsonb), updated_at=:now WHERE id=:id"),
             {"p": json.dumps(plan), "now": datetime.datetime.utcnow(), "id": project_id}
         )
         db.commit()
@@ -148,7 +148,7 @@ class MappingRepository:
                     (id, project_id, mapping_type, source_tables, target_tables,
                      join_condition, notes, created_at, updated_at)
                 VALUES
-                    (:id, :pid, :mtype, :src::jsonb, :tgt::jsonb,
+                    (:id, :pid, :mtype, CAST(:src AS jsonb), CAST(:tgt AS jsonb),
                      :jc, :notes, :now, :now)
             """),
             {
@@ -207,7 +207,7 @@ class MappingRepository:
                 VALUES
                     (:id, :tmid, :stbl, :scol, :styp,
                      :ttbl, :tcol, :ttyp, :kind,
-                     :cfg::jsonb, :safety, :cast_req,
+                     CAST(:cfg AS jsonb), :safety, :cast_req,
                      :cast_expr, :now)
             """),
             {

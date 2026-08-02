@@ -309,7 +309,7 @@ class JobControl:
             text("""
                 UPDATE migration_chunks
                 SET validation_status='pending'
-                WHERE id = ANY(:ids::uuid[])
+                WHERE id = ANY(CAST(:ids AS uuid[]))
             """),
             {"ids": chunk_ids}
         )
@@ -595,7 +595,7 @@ class JobControl:
                          resource_id, before_state, after_state, reason, created_at)
                     VALUES
                         (gen_random_uuid(), :tid, :op, :atype, :rtype,
-                         :rid, :before::jsonb, :after::jsonb, :reason, :now)
+                         :rid, CAST(:before AS jsonb), CAST(:after AS jsonb), :reason, :now)
                 """),
                 {
                     "tid":    _as_uuid_or_none(tenant_id),

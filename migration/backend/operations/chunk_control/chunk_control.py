@@ -321,7 +321,7 @@ class ChunkControl:
                          resource_id, before_state, after_state, reason, created_at)
                     VALUES
                         (gen_random_uuid(), :tid, :op, :atype, :rtype,
-                         :rid, :before::jsonb, :after::jsonb, :reason, :now)
+                         :rid, CAST(:before AS jsonb), CAST(:after AS jsonb), :reason, :now)
                 """),
                 {
                     "tid":    _as_uuid_or_none(tenant_id),

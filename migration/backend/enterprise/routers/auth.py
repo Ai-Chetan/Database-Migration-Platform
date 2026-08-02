@@ -6,12 +6,17 @@ Endpoints:
     POST /auth/register          → create tenant + admin user
     POST /auth/login             → get JWT token
     POST /auth/logout            → revoke session
+    POST /auth/change-password   → change own password
     POST /auth/invite            → invite user to tenant
     POST /auth/invite/accept     → accept invitation, create account
     GET  /auth/me                → current user info
     POST /auth/api-keys          → create API key
     GET  /auth/api-keys          → list API keys
     DELETE /auth/api-keys/{id}   → revoke API key
+
+CHANGES IN THIS VERSION (Stage 1 audit fix):
+  Added POST /auth/change-password, which didn't exist at all despite the
+  frontend Settings page calling it - that request would have 404'd.
 """
 
 import uuid
@@ -67,6 +72,11 @@ class CreateApiKeyRequest(BaseModel):
     name:       str
     role:       str = "api_client"
     expires_in_days: Optional[int] = 365
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password:     str
 
 
 @router.post("/register", summary="Create tenant and admin user")
@@ -199,6 +209,35 @@ def me(user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_
         "permissions": user.permissions,
         "full_name":   user_row.get("full_name") if user_row else None,
     }
+
+
+@router.post("/change-password", summary="Change your own password")
+def change_password(
+    req: ChangePasswordRequest,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+    db:   Session      = Depends(get_db),
+):
+    """Change the authenticated user's own password. Requires the current password."""
+    user_row = tenant_svc.get_user(db, user.user_id)
+    if not user_row or not verify_password(req.current_password, user_row.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+
+    db.execute(
+        text("UPDATE users SET password_hash=:ph WHERE id=:id"),
+        {"ph": hash_password(req.new_password), "id": user.user_id}
+    )
+    db.commit()
+
+    AuditTrail.log(
+        db=db, action="auth.password_changed",
+        tenant_id=user.tenant_id, user_id=user.user_id,
+        request=request,
+    )
+    return {"message": "Password changed successfully"}
 
 
 @router.post("/invite", summary="Invite a user to your tenant")
