@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
 from backend.shared.config.database import get_db
+from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.simulation.engine.simulation_engine import SimulationEngine
 
 router = APIRouter(prefix="/simulate", tags=["Simulation Engine"])

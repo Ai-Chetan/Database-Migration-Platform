@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { authApi } from '@/api/auth'
+import { authApi, RegisterPayload } from '@/api/auth'
 import { useAuthStore } from '@/store/auth'
 
 export function useAuth() {
@@ -10,8 +10,8 @@ export function useAuth() {
   const queryClient = useQueryClient()
 
   const loginMutation = useMutation({
-    mutationFn: ({ username, password }: { username: string; password: string }) =>
-      authApi.login(username, password),
+    mutationFn: ({ email, password }: { email: string; password: string }) =>
+      authApi.login(email, password),
     onSuccess: (data) => {
       setSession(data.user, data.access_token)
       toast.success(`Welcome back, ${data.user.name.split(' ')[0]}`)
@@ -19,6 +19,18 @@ export function useAuth() {
     },
     onError: (err: any) => {
       toast.error(err?.response?.data?.detail || 'Invalid email or password')
+    },
+  })
+
+  const registerMutation = useMutation({
+    mutationFn: (payload: RegisterPayload) => authApi.register(payload),
+    onSuccess: (data) => {
+      setSession(data.user, data.access_token)
+      toast.success(`Welcome, ${data.user.name.split(' ')[0]}! Your workspace is ready.`)
+      navigate('/app/dashboard')
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail || 'Could not create your account')
     },
   })
 
@@ -31,8 +43,10 @@ export function useAuth() {
   return {
     user,
     isAuthenticated,
-    login: loginMutation.mutate,
+    login: (email: string, password: string) => loginMutation.mutate({ email, password }),
     isLoggingIn: loginMutation.isPending,
+    register: registerMutation.mutate,
+    isRegistering: registerMutation.isPending,
     logout,
   }
 }

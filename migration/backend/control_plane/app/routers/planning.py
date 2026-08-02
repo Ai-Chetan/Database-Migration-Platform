@@ -32,14 +32,18 @@ from backend.shared.config.database import get_db
 from backend.enterprise.security.rbac.auth import get_current_user, require_permission, CurrentUser
 from backend.control_plane.app.repositories.migration_table_repository import MigrationTableRepository
 from backend.control_plane.app.repositories.migration_job_repository import MigrationJobRepository
+from backend.control_plane.app.repositories.migration_chunk_repository import MigrationChunkRepository
+from backend.control_plane.app.orchestrator.planner import Planner
 from backend.enterprise.adaptive_chunk_planner.planner import AdaptiveChunkPlanner
 from backend.shared.config.logging import logger
 
 router = APIRouter(prefix="/jobs/{job_id}/planning", tags=["Migration Planning"])
 
-table_repo = MigrationTableRepository()
-job_repo   = MigrationJobRepository()
-planner    = AdaptiveChunkPlanner()
+table_repo   = MigrationTableRepository()
+job_repo     = MigrationJobRepository()
+chunk_repo   = MigrationChunkRepository()
+planner      = AdaptiveChunkPlanner()
+chunk_maker  = Planner()
 
 
 class RegisterTablesRequest(BaseModel):
@@ -114,10 +118,11 @@ def compute_chunk_plans(
     _check_job_access(job, user)
 
     rows = db.execute(
-        text("SELECT table_name FROM migration_tables WHERE job_id=:jid"),
+        text("SELECT id, table_name FROM migration_tables WHERE job_id=:jid"),
         {"jid": job_id}
     ).fetchall()
-    table_names = [r[0] for r in rows]
+    table_ids_by_name = {r[1]: str(r[0]) for r in rows}
+    table_names = list(table_ids_by_name.keys())
 
     if not table_names:
         raise HTTPException(
@@ -150,6 +155,22 @@ def compute_chunk_plans(
             "notes":                  plan.notes,
         }
         total_chunks += plan.computed_chunk_count
+
+        # This is the step that actually creates migration_chunks rows and
+        # pushes them to the Redis queue for workers to pick up. Before this
+        # fix, compute_all_tables() only calculated sizing metadata - nothing
+        # anywhere in the codebase ever called Planner.generate_chunks(), so
+        # a job could reach "planning" complete and "start" with zero actual
+        # work items for any worker to pull.
+        if plan.row_count and plan.row_count > 0:
+            chunk_maker.generate_chunks(
+                db=db,
+                job_id=job_id,
+                table_id=table_ids_by_name[tname],
+                table_name=tname,
+                total_rows=plan.row_count,
+                chunk_size=plan.computed_chunk_size or 100000,
+            )
 
     db.execute(
         text("UPDATE migration_jobs SET total_chunks=:n WHERE id=:id"),

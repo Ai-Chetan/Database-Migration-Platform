@@ -89,7 +89,7 @@ class MetadataCatalog:
                      catalog_type, data, computed_at, expires_at, created_at)
                 VALUES
                     (:id, :tid, :cid, :svid, :tname,
-                     :ctype, :data::jsonb, :now, :expires, :now)
+                     :ctype, CAST(:data AS jsonb), :now, :expires, :now)
             """),
             {
                 "id": entry_id, "tid": tenant_id, "cid": connection_id,
