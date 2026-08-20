@@ -5,7 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { ArrowLeft, Database, MailCheck } from 'lucide-react'
 import { Button, Input, FormField } from '@/components/common'
-import apiClient from '@/api/client'
+import { authApi } from '@/api/auth'
 import { AuthVisualPanel } from '@/components/features/auth/AuthVisualPanel'
 
 const schema = z.object({
@@ -39,7 +39,7 @@ export default function ForgotPassword() {
 
   const onSubmit = async (values: FormValues) => {
     try {
-      await apiClient.post('/auth/forgot-password', { email: values.email })
+      await authApi.forgotPassword(values.email)
     } finally {
       // Always show the confirmation screen — never reveal whether the email exists.
       setSent(true)

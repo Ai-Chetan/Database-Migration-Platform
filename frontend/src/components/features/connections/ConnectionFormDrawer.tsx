@@ -8,7 +8,6 @@ import { Drawer, Button, FormField, Input, Select } from '@/components/common'
 import { connectionsApi } from '@/api/connections'
 import { Connection, Engine } from '@/types'
 import { ENGINE_LABELS } from '@/utils/meta'
-
 const ENGINE_OPTIONS: Engine[] = ['mysql', 'postgresql', 'sqlite', 's3', 'azure', 'gcs', 'kafka', 'rest_api', 'file']
 
 const schema = z.object({
@@ -71,7 +70,7 @@ export function ConnectionFormDrawer({ isOpen, onClose, connection }: Props) {
           host: connection.host,
           port: connection.port,
           database: connection.database,
-          username: '',
+          username: connection.username,
           password: '',
         })
       } else {
@@ -86,34 +85,46 @@ export function ConnectionFormDrawer({ isOpen, onClose, connection }: Props) {
   }
 
   const saveMutation = useMutation({
-    mutationFn: (values: FormValues) =>
-      isEdit ? connectionsApi.update(connection!.id, values) : connectionsApi.create(values),
+    mutationFn: async (values: FormValues) => {
+      if (!isEdit) {
+        return connectionsApi.create({ ...values, password: values.password ?? '' })
+      }
+      // Edit mode: field changes (name/host/port/database/username) and a
+      // password change are two different backend actions - the backend
+      // re-tests a new password before committing it, so it isn't just
+      // another field on a generic update. If the password field was left
+      // blank, only the non-password fields are sent.
+      const updated = await connectionsApi.update(connection!.id, {
+        name: values.name,
+        host: values.host,
+        port: values.port,
+        database: values.database,
+        username: values.username,
+      })
+      if (values.password) {
+        await connectionsApi.rotatePassword(connection!.id, values.password)
+      }
+      return updated
+    },
     onSuccess: () => {
       toast.success(isEdit ? 'Connection updated' : 'Connection created')
       queryClient.invalidateQueries({ queryKey: ['connections'] })
       onClose()
     },
     onError: (err: any) => {
-      console.log("STATUS:", err.response?.status);
-      console.log("DATA:", err.response?.data);
-      console.log(JSON.stringify(err.response?.data, null, 2));
-      console.table(err.response?.data.detail);
-
-      const detail = err.response?.data?.detail;
-
-      toast.error(
-        Array.isArray(detail)
-          ? detail.map((e: any) => e.msg).join(", ")
-          : String(detail)
-      );
+      const detail = err?.response?.data?.detail
+      toast.error(Array.isArray(detail) ? detail.map((e: any) => e.msg).join(', ') : detail || 'Failed to save connection')
     },
   })
 
-const onSubmit = (values: FormValues) => {
-  console.log("Submitting JSON:");
-  console.log(JSON.stringify(values, null, 2));
-  saveMutation.mutate(values);
-};
+  const onSubmit = (values: FormValues) => {
+    if (!isEdit && !values.password) {
+      toast.error('Password is required to create a connection.')
+      return
+    }
+    saveMutation.mutate(values)
+  }
+
   return (
     <Drawer
       isOpen={isOpen}
@@ -125,16 +136,7 @@ const onSubmit = (values: FormValues) => {
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            onClick={() => {
-              console.log("Button clicked");
-              handleSubmit(
-                onSubmit,
-                (errors) => console.log("Validation errors:", errors)
-              )();
-            }}
-            isLoading={saveMutation.isPending}
-          >
+          <Button onClick={handleSubmit(onSubmit)} isLoading={saveMutation.isPending}>
             {isEdit ? 'Save changes' : 'Create connection'}
           </Button>
         </>

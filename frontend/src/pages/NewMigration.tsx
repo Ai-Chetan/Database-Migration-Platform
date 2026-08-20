@@ -30,12 +30,16 @@ export default function NewMigration() {
 
   const launchMutation = useMutation({
     mutationFn: async () => {
+      // CHANGE: this previously sent {name, source_connection_id,
+      // target_connection_id, mapping_project_id, worker_count} - none of
+      // which the backend's CreateJobRequest ever accepted (it only took
+      // source_config/target_config, and even that required raw
+      // credentials the wizard never has). POST /jobs now accepts
+      // connection IDs directly and resolves credentials server-side -
+      // see control_plane/app/routers/jobs.py.
       const job = await jobsApi.create({
-        name: state.jobName,
         source_connection_id: state.sourceConnectionId,
         target_connection_id: state.targetConnectionId,
-        mapping_project_id: state.projectId,
-        worker_count: state.workerCount,
       })
       await jobsApi.start(job.id)
       return job
