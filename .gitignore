@@ -2,3 +2,9 @@ createdb.py
 verifydb.py
 project_clean.zip
 migration.zip
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+backend.zip
+frontend.zip
