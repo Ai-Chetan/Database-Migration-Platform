@@ -72,6 +72,8 @@ export interface User {
   is_active?: boolean
   last_login?: string | null
   created_at?: string
+  phone?: string
+  force_password_change?: boolean
 }
 
 export interface Connection {
@@ -81,6 +83,7 @@ export interface Connection {
   host: string
   port: number
   database: string
+  username: string
   status: ConnectionStatus
   last_tested_at: string | null
   latency_ms: number | null
@@ -92,15 +95,18 @@ export interface Job {
   status: JobStatus
   source_engine: Engine
   target_engine: Engine
-  source_connection_id: string
-  target_connection_id: string
-  mapping_project_id: string
-  worker_count: number
+  source_database: string
+  target_database: string
+  total_tables: number
+  total_chunks: number
+  completed_chunks: number
+  failed_chunks: number
   progress_pct: number
   rows_migrated: number
   started_at: string | null
   completed_at: string | null
   error_message: string | null
+  created_at: string
 }
 
 export interface LiveStats {
