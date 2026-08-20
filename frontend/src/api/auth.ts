@@ -89,4 +89,16 @@ export const authApi = {
 
   changePassword: (current_password: string, new_password: string) =>
     apiClient.post('/auth/change-password', { current_password, new_password }),
+
+  // Matches enterprise/routers/auth.py's forgot-password / reset-password
+  // pair (added to replace the old invite-only flow's missing piece -
+  // these endpoints didn't exist on the backend before, so this request
+  // was 404ing regardless of what the frontend sent).
+  forgotPassword: (email: string) =>
+    apiClient.post<{ message: string }>('/auth/forgot-password', { email }).then((r) => r.data),
+
+  resetPassword: (token: string, new_password: string) =>
+    apiClient
+      .post<{ message: string }>('/auth/reset-password', { token, new_password })
+      .then((r) => r.data),
 }
