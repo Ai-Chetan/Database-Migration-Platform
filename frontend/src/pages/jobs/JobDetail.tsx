@@ -77,14 +77,14 @@ export default function JobDetail() {
 
   const { data: workers = [] } = useQuery({
     queryKey: ['ops', 'workers', jobId],
-    queryFn: () => operationsApi.listWorkers(jobId),
+    queryFn: () => operationsApi.listWorkersForJob(jobId as string),
     enabled: !!jobId,
     refetchInterval: 5000,
   })
 
   const { data: chunks = [] } = useQuery({
     queryKey: ['ops', 'chunks', jobId],
-    queryFn: () => operationsApi.listChunks(jobId as string, { limit: 100 }),
+    queryFn: () => operationsApi.listChunks(jobId as string),
     enabled: !!jobId && tab === 'chunks',
     refetchInterval: 5000,
   })
@@ -97,9 +97,10 @@ export default function JobDetail() {
 
   const controlMutation = useMutation({
     mutationFn: (action: 'pause' | 'resume' | 'cancel') => {
-      if (action === 'pause') return operationsApi.pauseJob(jobId as string)
-      if (action === 'resume') return operationsApi.resumeJob(jobId as string)
-      return operationsApi.cancelJob(jobId as string)
+      if (action === 'pause') return operationsApi.pauseJob(jobId as string, 'Paused by operator from Job Detail')
+      if (action === 'resume') return operationsApi.resumeJob(jobId as string, 'Resumed by operator from Job Detail')
+      // cancel requires a non-empty reason server-side (400 otherwise)
+      return operationsApi.cancelJob(jobId as string, 'Cancelled by operator from Job Detail')
     },
     onSuccess: (_, action) => {
       toast.success(`Job ${action === 'pause' ? 'paused' : action === 'resume' ? 'resumed' : 'cancelled'}`)
