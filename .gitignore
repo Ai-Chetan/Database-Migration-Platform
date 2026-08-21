@@ -9,3 +9,16 @@ __pycache__/
 backend.zip
 frontend.zip
 migration.zip
+
+# Node.js dependencies
+node_modules/
+frontend/node_modules/
+
+# Build output
+dist/
+frontend/dist/
+
+# Environment files
+.env
+.env.*
+!.env.example

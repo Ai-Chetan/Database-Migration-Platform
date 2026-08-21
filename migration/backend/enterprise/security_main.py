@@ -25,9 +25,9 @@ ALL ENDPOINTS:
     POST   /auth/login                 Login → get JWT token
     POST   /auth/logout                Revoke session
     GET    /auth/me                    Current user info + permissions
-    POST   /auth/invite                Invite user to tenant
-    POST   /auth/invite/accept         Accept invitation → create account
-    GET    /auth/invitations           List pending invitations
+    POST   /auth/change-password       Change your own password
+    POST   /auth/forgot-password       Request a password reset email
+    POST   /auth/reset-password        Complete a password reset with a token
     POST   /auth/api-keys              Create API key for machine access
     GET    /auth/api-keys              List API keys (prefixes only)
     DELETE /auth/api-keys/{id}         Revoke API key
@@ -35,6 +35,9 @@ ALL ENDPOINTS:
 ── TENANTS & USERS ────────────────────────────────────────────────────────────
     GET    /tenants/{id}               Tenant detail
     GET    /tenants/{id}/users         List users in tenant
+    POST   /tenants/{id}/users         Create a user directly (admin action - replaces the old invite flow)
+    POST   /tenants/{id}/users/{uid}/reset-password  Admin resets a user's password
+    POST   /tenants/{id}/users/{uid}/reactivate      Re-enable a deactivated user
     PUT    /tenants/{id}/users/{uid}/role  Change user role
     DELETE /tenants/{id}/users/{uid}   Deactivate user
     GET    /tenants/{id}/usage         Usage statistics (jobs, rows, API calls)
@@ -70,6 +73,12 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+# Load .env before any backend import that reads os.environ at import time
+# (see backend/main.py for the full explanation - same fix applied here
+# since this file is also a standalone runnable entrypoint).
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(filename=".env", usecwd=True))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

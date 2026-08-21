@@ -71,35 +71,38 @@ class AuditTrail:
 
         import json
         try:
+            details = None
+            if old_value is not None or new_value is not None:
+                details = json.dumps({"old_value": old_value, "new_value": new_value})
+
             db.execute(
                 text("""
                     INSERT INTO audit_logs
                         (id, tenant_id, user_id, action,
                          resource_type, resource_id,
-                         old_value, new_value,
+                         details,
                          ip_address, user_agent,
-                         status, error_msg, created_at)
+                         status, error_message, created_at)
                     VALUES
                         (:id, :tid, :uid, :action,
                          :rtype, CAST(:rid AS uuid),
-                         CAST(:old AS jsonb), CAST(:new AS jsonb),
+                         CAST(:details AS jsonb),
                          :ip, :ua,
                          :status, :err, :now)
                 """),
                 {
-                    "id":     str(uuid.uuid4()),
-                    "tid":    tenant_id,
-                    "uid":    user_id,
-                    "action": action,
-                    "rtype":  resource_type,
-                    "rid":    resource_id,
-                    "old":    json.dumps(old_value) if old_value else None,
-                    "new":    json.dumps(new_value) if new_value else None,
-                    "ip":     ip_address,
-                    "ua":     (user_agent or "")[:500],
-                    "status": status,
-                    "err":    error_msg,
-                    "now":    datetime.datetime.utcnow(),
+                    "id":      str(uuid.uuid4()),
+                    "tid":     tenant_id,
+                    "uid":     user_id,
+                    "action":  action,
+                    "rtype":   resource_type,
+                    "rid":     resource_id,
+                    "details": details,
+                    "ip":      ip_address,
+                    "ua":      (user_agent or "")[:500],
+                    "status":  status,
+                    "err":     error_msg,
+                    "now":     datetime.datetime.utcnow(),
                 }
             )
             db.commit()
@@ -161,39 +164,40 @@ class AuditTrail:
         params: Dict[str, Any] = {"lim": limit, "off": offset}
 
         if tenant_id:
-            conditions.append("tenant_id = :tid")
+            conditions.append("al.tenant_id = :tid")
             params["tid"] = tenant_id
         if user_id:
-            conditions.append("user_id = :uid")
+            conditions.append("al.user_id = :uid")
             params["uid"] = user_id
         if action:
-            conditions.append("action ILIKE :action")
+            conditions.append("al.action ILIKE :action")
             params["action"] = f"%{action}%"
         if resource_type:
-            conditions.append("resource_type = :rtype")
+            conditions.append("al.resource_type = :rtype")
             params["rtype"] = resource_type
         if resource_id:
-            conditions.append("resource_id = CAST(:rid AS uuid)")
+            conditions.append("al.resource_id = CAST(:rid AS uuid)")
             params["rid"] = resource_id
 
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
         rows = db.execute(
             text(f"""
-                SELECT id, tenant_id, user_id, action,
-                       resource_type, resource_id,
-                       old_value, new_value,
-                       ip_address, status, error_msg, created_at
-                FROM audit_logs
+                SELECT al.id, al.tenant_id, al.user_id, u.email AS user_email, al.action,
+                       al.resource_type, al.resource_id,
+                       al.details,
+                       al.ip_address, al.status, al.error_message, al.created_at
+                FROM audit_logs al
+                LEFT JOIN users u ON u.id = al.user_id
                 {where}
-                ORDER BY created_at DESC
+                ORDER BY al.created_at DESC
                 LIMIT :lim OFFSET :off
             """),
             params
         ).fetchall()
 
         total_row = db.execute(
-            text(f"SELECT COUNT(*) FROM audit_logs {where}"),
+            text(f"SELECT COUNT(*) FROM audit_logs al {where}"),
             {k: v for k, v in params.items() if k not in ("lim", "off")}
         ).fetchone()
 
