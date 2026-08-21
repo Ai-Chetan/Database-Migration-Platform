@@ -3,63 +3,39 @@ End-to-End HTTP API Test
 File: migration/test_e2e_api.py
 
 Tests the platform through its REAL HTTP API - the exact same endpoints
-the frontend calls - rather than importing Python classes directly. This
-is deliberately different from test_worker_e2e.py (which bypasses the API
-and calls Planner/ChunkExecutor directly): the point of THIS script is to
-catch integration bugs between the API layer and the frontend contract,
-not just verify the underlying orchestration logic works in isolation.
+the frontend calls - rather than importing Python classes directly.
 
-What this does, in order:
-    1. Registers a new tenant + tenant_admin user (easy demo credentials)
-    2. Invites + accepts one demo user per remaining role (easy passwords)
-    3. Logs in as the admin
-    4. Registers a source connection (billnbox) and target connection
-       (billnboxtest) - both MySQL on localhost:3306
-    5. Tests both connections live
-    6. Pre-creates the target `owner` table (the platform does not
-       auto-generate target DDL as part of the execution path - table
-       structure has to exist on the target before chunks can write to it;
-       DDL generation is a separate, manual Schema Mapping Service step)
-    7. Creates a migration job, registers the `owner` table, computes the
-       chunk plan (this also generates the actual migration_chunks rows
-       and pushes them to Redis - see the Stage 1 fix note below)
-    8. Starts the job
-    9. Prints the exact command to start a worker in a separate terminal
-   10. Polls job status until complete (or a timeout), printing progress
-   11. Queries both databases directly and compares row counts
+CHANGES IN THIS VERSION:
+  - STEP 2 no longer uses the invitation flow (POST /auth/invite and
+    /auth/invite/accept were both REMOVED per product decision - admins
+    now create users directly). Rewritten to call
+    POST /tenants/{tenant_id}/users, matching enterprise/routers/tenants.py.
+  - Every step that creates a named resource (tenant, connections, demo
+    users) is now idempotent: if it already exists from a previous run,
+    the script looks it up and reuses it instead of failing. Previously
+    only tenant/admin registration handled this - connection creation did
+    not, so re-running this script against a database that already had
+    connections from a prior run would immediately 500 and abort with
+    nothing else tested.
+  - STEP 6 (create job) now uses source_connection_id / target_connection_id
+    instead of re-embedding plaintext credentials into the job payload.
+    POST /jobs previously only accepted raw source_config/target_config
+    dicts - which meant the ONLY way to create a job was to already have
+    the plaintext password sitting in your test script. It now accepts a
+    connection_id pair directly and resolves credentials server-side
+    (see control_plane/app/routers/jobs.py) - this is also what the New
+    Migration wizard's frontend does now.
+  - Added STEP 2b: a quick forgot-password / reset-password smoke test,
+    since those endpoints didn't exist at all before this round of fixes.
 
 BEFORE RUNNING:
     pip install requests mysql-connector-python
     Edit the CONFIG block below with your real MySQL credentials.
     Make sure the backend is running: uvicorn backend.main:app --reload
-    Make sure Redis and the metadata Postgres DB are running.
+    Make sure Redis and the metadata Postgres DB are running, and that
+    db_migrations/019 and 020 have been applied.
     Make sure the `billnbox` database and `owner` table already exist
     with some rows in it (this script does not create source data).
-
-STAGE 1 CONTEXT (why this script exists / what it will catch):
-    Several real bugs were found and fixed in the backend this session,
-    including one that would have made this exact test hang forever with
-    zero visible error: AdaptiveChunkPlanner.compute_all_tables() computed
-    chunk SIZING metadata, but nothing anywhere in the codebase actually
-    called Planner.generate_chunks() to create the real migration_chunks
-    rows and push them to the Redis queue - so a job could reach "started"
-    with literally no work items for any worker to ever pull. That's now
-    wired into POST /jobs/{id}/planning/compute. If this script hangs at
-    the polling step with total_chunks staying at 0, that fix didn't make
-    it into the code you're running against.
-
-    Also fixed: migration_jobs.status never transitioned to 'running'
-    anywhere (jumped straight from 'planning' to 'completed'/'failed').
-    If start_job() output below shows status stuck at "planning" instead
-    of "running", that fix isn't present either.
-
-    Job creation currently only accepts raw source_config/target_config
-    credential dicts (POST /jobs), not connection_id references - that
-    integration gap is still open as of this script (see the running
-    conversation for status). This script works around it by reading the
-    connection details back out and re-embedding the plaintext credentials
-    directly into the job payload, exactly like the current frontend would
-    have to (badly) if it tried to do this today.
 """
 
 import sys
@@ -82,7 +58,7 @@ BASE_URL = "http://localhost:8000"
 MYSQL_HOST = "localhost"
 MYSQL_PORT = 3306
 MYSQL_USER = "root"           # <-- edit
-MYSQL_PASSWORD = "root"       # <-- edit
+MYSQL_PASSWORD = " "       # <-- edit
 SOURCE_DB = "billnbox"
 TARGET_DB = "billnboxtest"
 
@@ -93,8 +69,6 @@ ADMIN_PASSWORD = "Demo@1234"
 ADMIN_NAME = "Demo Admin"
 
 # One demo account per remaining role (tenant_admin is the one created above).
-# All use the same easy password so you can log into the frontend and click
-# around as each role without hunting for credentials.
 DEMO_PASSWORD = "Demo@1234"
 DEMO_ROLES = [
     "migration_admin",
@@ -102,13 +76,12 @@ DEMO_ROLES = [
     "read_only",
     "auditor",
     "api_client",
-    "platform_admin",  # unusual to invite within a tenant, included for completeness
+    "platform_admin",  # unusual to create within a tenant, included for completeness
 ]
 
 TABLE_NAME = "owner"
 PRIMARY_KEY_COLUMN = "OwnerID"
 
-# Exact structure you gave for `owner`, used to pre-create it on the target.
 TARGET_TABLE_DDL = f"""
 CREATE TABLE IF NOT EXISTS `{TABLE_NAME}` (
     `OwnerID` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -146,8 +119,6 @@ def info(msg):
 
 
 def request(method, path, token=None, **kwargs):
-    """Thin wrapper that prints the real request/response so failures are
-    immediately diagnosable, matching how you'd read a browser network tab."""
     url = f"{BASE_URL}{path}"
     headers = kwargs.pop("headers", {})
     if token:
@@ -162,11 +133,42 @@ def request(method, path, token=None, **kwargs):
     return resp
 
 
+def get_or_create_connection(token, name, db_name):
+    """Idempotent: reuses an existing connection with this name if one
+    already exists (from a prior run of this script) instead of 500ing on
+    the unique (tenant_id, name) constraint."""
+    resp = request("POST", "/connections", token=token, json={
+        "name": name,
+        "engine": "mysql",
+        "host": MYSQL_HOST,
+        "port": MYSQL_PORT,
+        "database": db_name,
+        "username": MYSQL_USER,
+        "password": MYSQL_PASSWORD,
+        "test_before_save": True,
+    })
+    if resp.status_code == 200:
+        return resp.json()["id"]
+    if resp.status_code == 400 and "already exists" in resp.text.lower():
+        info(f"Connection '{name}' already exists - reusing it")
+        listing = request("GET", "/connections", token=token)
+        if listing.status_code == 200:
+            for conn in listing.json():
+                if conn["name"] == name:
+                    return conn["id"]
+        fail(f"Connection '{name}' reportedly exists but wasn't found in the list")
+        return None
+    fail(f"Could not create or find connection '{name}'")
+    return None
+
+
 def main():
     admin_token = None
+    tenant_id = None
     source_conn_id = None
     target_conn_id = None
     job_id = None
+    source_row_count = 0
 
     # ── Step 1: Register admin + tenant ────────────────────────────────────
     step(1, "Register tenant + admin user")
@@ -193,64 +195,60 @@ def main():
         fail(f"Registration failed unexpectedly: {resp.status_code}")
         return
 
-    # ── Step 2: Invite + accept demo users for every other role ───────────
-    step(2, "Create demo accounts for every role")
+    me = request("GET", "/auth/me", token=admin_token)
+    if me.status_code != 200:
+        fail("GET /auth/me failed - can't determine tenant_id for subsequent steps. "
+             "If this 500s with 'column phone does not exist', run "
+             "db_migrations/019_fix_user_roles_and_admin_management.sql first.")
+        return
+    tenant_id = me.json()["tenant_id"]
+    info(f"tenant_id = {tenant_id}")
+
+    # ── Step 2: Create demo accounts for every role, directly ──────────────
+    step(2, "Create demo accounts for every role (direct create, not invite)")
     for role in DEMO_ROLES:
         email = f"{role}@demo.local"
-        resp = request("POST", "/auth/invite", token=admin_token, json={"email": email, "role": role})
-        if resp.status_code != 200:
-            fail(f"Could not invite {role} ({email}) - skipping")
-            continue
-        invite_token = resp.json()["token"]
-
-        resp2 = request("POST", "/auth/invite/accept", json={
-            "token": invite_token,
+        resp = request("POST", f"/tenants/{tenant_id}/users", token=admin_token, json={
+            "email": email,
             "full_name": f"Demo {role.replace('_', ' ').title()}",
+            "role": role,
             "password": DEMO_PASSWORD,
+            "must_change_password": False,
+            "send_welcome_email": False,
         })
-        if resp2.status_code == 200:
+        if resp.status_code == 200:
             ok(f"{role:<20} -> {email} / {DEMO_PASSWORD}")
+        elif resp.status_code == 400 and "already" in resp.text.lower():
+            info(f"{role:<20} -> {email} already exists, skipping")
         else:
-            fail(f"Invite created for {role} but accept failed: {resp2.status_code}")
+            fail(f"Could not create {role} ({email})")
 
     info("\n  All demo accounts (password for all: " + DEMO_PASSWORD + "):")
     info(f"    tenant_admin         -> {ADMIN_EMAIL}")
     for role in DEMO_ROLES:
         info(f"    {role:<20} -> {role}@demo.local")
 
-    # ── Step 3: Register connections ────────────────────────────────────────
-    step(3, "Register source + target connections")
-    resp = request("POST", "/connections", token=admin_token, json={
-        "name": "billnbox (source)",
-        "db_type": "mysql",
-        "host": MYSQL_HOST,
-        "port": MYSQL_PORT,
-        "database_name": SOURCE_DB,
-        "username": MYSQL_USER,
-        "password": MYSQL_PASSWORD,
-        "test_before_save": True,
-    })
-    if resp.status_code != 200:
-        fail("Could not create source connection. Check MySQL credentials in the CONFIG block.")
-        return
-    source_conn_id = resp.json()["id"]
-    ok(f"Source connection created: {source_conn_id}")
+    # ── Step 2b: Forgot-password / reset-password smoke test ───────────────
+    step("2b", "Forgot-password / reset-password smoke test")
+    resp = request("POST", "/auth/forgot-password", json={"email": ADMIN_EMAIL})
+    if resp.status_code == 200:
+        ok("POST /auth/forgot-password returned 200 (check server logs or your inbox "
+           "for the reset link if SMTP is configured - the token itself is never "
+           "returned in the API response, by design)")
+    else:
+        fail("POST /auth/forgot-password did not return 200")
 
-    resp = request("POST", "/connections", token=admin_token, json={
-        "name": "billnboxtest (target)",
-        "db_type": "mysql",
-        "host": MYSQL_HOST,
-        "port": MYSQL_PORT,
-        "database_name": TARGET_DB,
-        "username": MYSQL_USER,
-        "password": MYSQL_PASSWORD,
-        "test_before_save": True,
-    })
-    if resp.status_code != 200:
-        fail(f"Could not create target connection. Does the '{TARGET_DB}' database exist yet?")
+    # ── Step 3: Register source + target connections (idempotent) ──────────
+    step(3, "Register source + target connections")
+    source_conn_id = get_or_create_connection(admin_token, "billnbox (source)", SOURCE_DB)
+    if source_conn_id:
+        ok(f"Source connection: {source_conn_id}")
+    target_conn_id = get_or_create_connection(admin_token, "billnboxtest (target)", TARGET_DB)
+    if target_conn_id:
+        ok(f"Target connection: {target_conn_id}")
+    if not source_conn_id or not target_conn_id:
+        fail("Could not obtain both connections - stopping.")
         return
-    target_conn_id = resp.json()["id"]
-    ok(f"Target connection created: {target_conn_id}")
 
     # ── Step 4: Test both connections live ─────────────────────────────────
     step(4, "Test both connections")
@@ -284,7 +282,6 @@ def main():
         fail(f"Could not create target table: {e}")
         return
 
-    # Also grab the source row count directly for the final comparison.
     try:
         conn = mysql.connector.connect(
             host=MYSQL_HOST, port=MYSQL_PORT, user=MYSQL_USER,
@@ -303,23 +300,11 @@ def main():
         fail(f"Could not read source table: {e}")
         return
 
-    # ── Step 6: Create the job ──────────────────────────────────────────────
+    # ── Step 6: Create the job (connection-ID based, no plaintext creds) ────
     step(6, "Create migration job")
-    # NOTE: /jobs currently only accepts raw source_config/target_config -
-    # it does not (yet) accept connection_id references. Re-embedding the
-    # plaintext credentials here mirrors exactly what the frontend would
-    # have to do today given that gap (see script header).
-    source_config = {
-        "engine": "mysql", "host": MYSQL_HOST, "port": MYSQL_PORT,
-        "database": SOURCE_DB, "username": MYSQL_USER, "password": MYSQL_PASSWORD,
-    }
-    target_config = {
-        "engine": "mysql", "host": MYSQL_HOST, "port": MYSQL_PORT,
-        "database": TARGET_DB, "username": MYSQL_USER, "password": MYSQL_PASSWORD,
-    }
     resp = request("POST", "/jobs", token=admin_token, json={
-        "source_config": source_config,
-        "target_config": target_config,
+        "source_connection_id": source_conn_id,
+        "target_connection_id": target_conn_id,
     })
     if resp.status_code != 200:
         fail("Job creation failed")
@@ -339,20 +324,23 @@ def main():
     ok(f"Table `{TABLE_NAME}` registered")
 
     resp = request("POST", f"/jobs/{job_id}/planning/compute", token=admin_token, json={
-        "source_config": source_config,
+        "source_config": {
+            "engine": "mysql", "host": MYSQL_HOST, "port": MYSQL_PORT,
+            "database": SOURCE_DB, "username": MYSQL_USER, "password": MYSQL_PASSWORD,
+        },
         "source_db_type": "mysql",
         "target_db_type": "mysql",
         "primary_key_columns": {TABLE_NAME: PRIMARY_KEY_COLUMN},
     })
     if resp.status_code != 200:
-        fail("Chunk planning failed")
+        fail("Chunk planning failed. If this 500s with a NotNullViolation on "
+             "migration_chunks.table_name, make sure you're running the latest "
+             "control_plane/app/orchestrator/planner.py.")
         return
     plan = resp.json()
     total_chunks = plan["total_chunks"]
     if total_chunks == 0:
-        fail("total_chunks came back as 0 - if the source table has rows, this "
-             "means Planner.generate_chunks() isn't wired into /planning/compute "
-             "in the code you're running. Nothing will happen if you start this job.")
+        fail("total_chunks came back as 0 - nothing will happen if you start this job.")
     else:
         ok(f"Chunk plan computed: {total_chunks} chunk(s) created and queued")
 
@@ -366,13 +354,11 @@ def main():
     if status == "running":
         ok("Job status is 'running'")
     else:
-        fail(f"Job status is '{status}', expected 'running' - the status-transition "
-             "fix may not be present in the code you're running.")
+        fail(f"Job status is '{status}', expected 'running'")
 
     # ── Step 9: Prompt to start a worker ─────────────────────────────────────
     step(9, "Start a worker")
-    info("This script does not start a worker for you (worker env/PYTHONPATH")
-    info("setup varies too much to do reliably from here). In a SEPARATE")
+    info("This script does not start a worker for you. In a SEPARATE")
     info("terminal, from the migration/ directory, run:\n")
     print(f"    WORKER_ID=worker-1 TENANT_ID={TENANT_SLUG} python -m backend.worker_service.app.worker\n")
     input("  Press Enter once the worker is running and you see 'Worker ready'...")
@@ -381,6 +367,7 @@ def main():
     step(10, f"Polling job status (every {POLL_INTERVAL_SEC}s, up to {POLL_TIMEOUT_SEC}s)")
     started = time.time()
     last_progress = None
+    job = None
     while time.time() - started < POLL_TIMEOUT_SEC:
         resp = request("GET", f"/jobs/{job_id}", token=admin_token)
         job = resp.json()
@@ -395,9 +382,9 @@ def main():
         fail(f"Timed out after {POLL_TIMEOUT_SEC}s waiting for the job to finish. "
              "Check the worker's terminal output for errors.")
 
-    if job["status"] == "completed":
+    if job and job["status"] == "completed":
         ok("Job completed")
-    elif job["status"] == "failed":
+    elif job and job["status"] == "failed":
         fail(f"Job failed: {job.get('last_error')}")
 
     # ── Step 11: Verify row counts ────────────────────────────────────────────

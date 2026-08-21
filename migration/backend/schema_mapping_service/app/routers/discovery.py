@@ -32,9 +32,12 @@ from backend.schema_mapping_service.app.repositories.mapping_repository import M
 from backend.schema_mapping_service.app.schemas.schemas import (
     DiscoverRequest, FileImportRequest, SchemaVersionResponse
 )
+from backend.enterprise.connection_manager.connection_manager import ConnectionManager
+from backend.shared.utils.db_config import normalize_db_config
 
-router = APIRouter(prefix="/schemas", tags=["Schema Discovery"])
-repo   = MappingRepository()
+router  = APIRouter(prefix="/schemas", tags=["Schema Discovery"])
+repo    = MappingRepository()
+conn_mgr = ConnectionManager()
 
 
 def _owned_schema(db: Session, schema_id: str, user: CurrentUser) -> dict:
@@ -56,7 +59,13 @@ def discover_schema(
     Connect to a live database and discover its full schema.
     Saves the result as a new schema version in the metadata DB.
 
-    Request body:
+    Supply EITHER connection_id (preferred - resolves a saved Connection's
+    credentials server-side) OR config directly:
+    {
+      "name": "production_mysql",
+      "connection_id": "5b8e6810-..."
+    }
+    OR
     {
       "name": "production_mysql",
       "config": {
@@ -69,8 +78,25 @@ def discover_schema(
       }
     }
     """
+    if req.connection_id:
+        conn = conn_mgr.get(db, req.connection_id)
+        if not conn or (not user.can("*") and conn["tenant_id"] != user.tenant_id):
+            raise HTTPException(status_code=404, detail=f"Connection {req.connection_id} not found")
+        config = conn_mgr.get_config(db, req.connection_id)
+        if not config:
+            raise HTTPException(status_code=400, detail="Could not resolve connection credentials.")
+    elif req.config:
+        # Same user/username, database/database_name key-name normalization
+        # used at job creation - see shared/utils/db_config.py.
+        try:
+            config = normalize_db_config(req.config)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    else:
+        raise HTTPException(status_code=400, detail="Either connection_id or config must be provided.")
+
     try:
-        discoverer  = SchemaDiscovery(config=req.config)
+        discoverer  = SchemaDiscovery(config=config)
         schema_data = discoverer.discover()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Discovery failed: {e}")
@@ -79,7 +105,7 @@ def discover_schema(
         db=db,
         tenant_id=user.tenant_id,
         name=req.name,
-        db_type=req.config.get("engine", "unknown"),
+        db_type=config.get("engine", "unknown"),
         schema_data=schema_data,
         version_label=req.version_label,
         source_type="live_db",

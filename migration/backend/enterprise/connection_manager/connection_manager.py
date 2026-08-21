@@ -148,6 +148,19 @@ class ConnectionManager:
         conn_id       = str(uuid.uuid4())
         now           = datetime.datetime.utcnow()
 
+        # CHANGE: name is unique per (tenant_id, name) at the DB level
+        # (idx_conn_registry_name), but nothing checked that before
+        # attempting the INSERT - a duplicate name surfaced as a raw
+        # unhandled 500 (psycopg2.errors.UniqueViolation) instead of a
+        # clear error. Check first and raise the same ValueError pattern
+        # used everywhere else in this codebase (-> 400 Bad Request).
+        existing = db.execute(
+            text("SELECT id FROM connection_registry WHERE tenant_id=:tid AND name=:name AND is_active=TRUE"),
+            {"tid": tenant_id, "name": name}
+        ).fetchone()
+        if existing:
+            raise ValueError(f"A connection named '{name}' already exists.")
+
         db.execute(
             text("""
                 INSERT INTO connection_registry
