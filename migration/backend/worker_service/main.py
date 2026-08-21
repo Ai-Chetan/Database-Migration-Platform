@@ -1,63 +1,60 @@
 """
-Worker Entry Point — with Prometheus Metrics
-File: migration/backend/worker_service/main.py
+Monitoring Service — FastAPI Application
+File: migration/backend/monitoring/main.py
 
-Changes:
-    1. Starts Prometheus metrics HTTP server on port 8002
-       Prometheus scrapes:  http://localhost:8002/metrics
-    2. Starts QueueDepthCollector background thread
-    3. Everything else unchanged
+Independent FastAPI service. Run it separately from the worker.
 
-Ports used by the full platform:
-    8000 → Control Plane API (future)
-    8001 → Monitoring Service API
-    8002 → Prometheus metrics (this file, per worker)
-    5432 → PostgreSQL
-    6379 → Redis
+Start:
+    cd migration/
+    uvicorn backend.monitoring_service.main:app --host 0.0.0.0 --port 8001 --reload
+
+Interactive docs:
+    http://localhost:8001/docs
+
+All endpoints:
+    GET  /health
+    GET  /jobs
+    GET  /jobs/{job_id}
+    GET  /jobs/{job_id}/tables
+    GET  /jobs/{job_id}/chunks
+    GET  /jobs/{job_id}/chunks?status=failed
+    GET  /jobs/{job_id}/metrics
+    GET  /workers
+    GET  /metrics
 """
 
-import signal
 import sys
 import os
-import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from backend.worker_service.app.worker import Worker
-from backend.worker_service.app.monitoring.metrics_registry import start_metrics_server
-from backend.worker_service.app.monitoring.queue_depth_collector import QueueDepthCollector
-from backend.shared.config.logging import logger
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-_worker_instance = None
+from backend.monitoring_service.app.routers import jobs, chunks, workers, metrics
 
+app = FastAPI(
+    title="Migration Platform — Monitoring API",
+    description="Real-time visibility into migration jobs, chunks, workers, and performance metrics.",
+    version="1.0.0",
+)
 
-def handle_shutdown(signum, frame):
-    logger.info("Shutdown signal received")
-    sys.exit(0)
+# Allow all origins for now — tighten for production
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
-
-def main():
-    global _worker_instance
-
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    signal.signal(signal.SIGINT, handle_shutdown)
-
-    worker_id = f"worker-{uuid.uuid4().hex[:8]}"
-    logger.info("Starting worker", worker_id=worker_id)
-
-    # Start Prometheus metrics HTTP server
-    # If multiple workers run on the same machine, only the first one
-    # will bind port 8002 — the others silently skip (handled in metrics_registry.py)
-    start_metrics_server(port=8002)
-
-    # Start background thread that polls Redis queue depth → Prometheus gauges
-    collector = QueueDepthCollector()
-    collector.start()
-
-    # Start the worker
-    _worker_instance = Worker(worker_id=worker_id)
-    _worker_instance.run()
+# Register all routers
+app.include_router(jobs.router)
+app.include_router(chunks.router)
+app.include_router(workers.router)
+app.include_router(metrics.router)
 
 
-if __name__ == "__main__":
-    main()
+@app.get("/health", tags=["Health"])
+def health():
+    """Simple health check — returns 200 if service is up."""
+    return {"status": "ok", "service": "monitoring_service"}

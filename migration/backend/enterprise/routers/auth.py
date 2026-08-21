@@ -7,16 +7,28 @@ Endpoints:
     POST /auth/login             → get JWT token
     POST /auth/logout            → revoke session
     POST /auth/change-password   → change own password
-    POST /auth/invite            → invite user to tenant
-    POST /auth/invite/accept     → accept invitation, create account
+    POST /auth/forgot-password   → request a password reset email
+    POST /auth/reset-password    → complete a password reset with a token
     GET  /auth/me                → current user info
     POST /auth/api-keys          → create API key
     GET  /auth/api-keys          → list API keys
     DELETE /auth/api-keys/{id}   → revoke API key
 
-CHANGES IN THIS VERSION (Stage 1 audit fix):
-  Added POST /auth/change-password, which didn't exist at all despite the
-  frontend Settings page calling it - that request would have 404'd.
+CHANGES IN THIS VERSION:
+  - REMOVED the invitation-based user flow (POST /auth/invite,
+    POST /auth/invite/accept, GET /auth/invitations). Per product
+    decision, admins now create user accounts directly with
+    POST /tenants/{id}/users (see enterprise/routers/tenants.py) instead
+    of sending an invite the person has to accept. invitation_service.py
+    is left in the codebase but is no longer imported/used anywhere - kept
+    only in case this decision is reversed later.
+  - ADDED POST /auth/forgot-password and POST /auth/reset-password. These
+    were referenced by shared/auth/auth_email.py's integration notes and
+    by the frontend's ForgotPassword.tsx page, but never actually existed
+    on the backend - that request was 404ing. Uses the existing
+    password_reset_tokens table (was already in the schema, unused).
+  - Added POST /auth/change-password in a previous pass, which didn't
+    exist at all despite the frontend Settings page calling it.
 """
 
 import uuid
@@ -36,11 +48,14 @@ from backend.enterprise.security.rbac.auth import (
 )
 from backend.enterprise.security.audit.audit_trail import AuditTrail
 from backend.enterprise.saas.tenants.tenant_service import TenantService
-from backend.enterprise.saas.invitations.invitation_service import InvitationService
+from backend.shared.auth.auth_email import send_password_reset_email, send_password_changed_notice
 
 router      = APIRouter(prefix="/auth", tags=["Authentication"])
 tenant_svc  = TenantService()
-invite_svc  = InvitationService()
+
+# Password reset tokens are valid for 1 hour. Matches the copy in
+# send_password_reset_email()'s email body - keep both in sync if changed.
+RESET_TOKEN_TTL_MINUTES = 60
 
 
 class RegisterRequest(BaseModel):
@@ -57,17 +72,6 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class InviteRequest(BaseModel):
-    email: str
-    role:  str = "migration_operator"
-
-
-class AcceptInviteRequest(BaseModel):
-    token:     str
-    full_name: str
-    password:  str
-
-
 class CreateApiKeyRequest(BaseModel):
     name:       str
     role:       str = "api_client"
@@ -77,6 +81,15 @@ class CreateApiKeyRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password:     str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordConfirmRequest(BaseModel):
+    token:        str
+    new_password: str
 
 
 @router.post("/register", summary="Create tenant and admin user")
@@ -240,73 +253,107 @@ def change_password(
     return {"message": "Password changed successfully"}
 
 
-@router.post("/invite", summary="Invite a user to your tenant")
-def invite_user(
-    req:     InviteRequest,
-    request: Request,
-    user:    CurrentUser = Depends(require_permission("users:create")),
-    db:      Session     = Depends(get_db),
-):
+@router.post("/forgot-password", summary="Request a password reset email")
+def forgot_password(req: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)):
     """
-    Invite someone to join your tenant workspace.
-    Returns a token that the invitee uses to create their account.
-    In production: email the invite_url to the user.
+    Always returns a generic success message whether or not the email
+    exists, so this endpoint can't be used to enumerate registered emails.
+    If the email exists, a reset token is generated, hashed, stored in
+    password_reset_tokens, and emailed to the user (or logged to console
+    if SMTP isn't configured - see .env.example).
     """
+    generic_response = {
+        "message": "If an account exists for that email, a password reset link has been sent."
+    }
+
+    user_row = tenant_svc.get_user_by_email(db, req.email)
+    if not user_row:
+        # Deliberately identical response + no error - don't leak whether
+        # the email is registered.
+        return generic_response
+
+    raw_token  = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=RESET_TOKEN_TTL_MINUTES)
+
+    db.execute(
+        text("""
+            INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at)
+            VALUES (:id, :uid, :hash, :exp, :now)
+        """),
+        {
+            "id": str(uuid.uuid4()), "uid": user_row["id"], "hash": token_hash,
+            "exp": expires_at, "now": datetime.datetime.utcnow(),
+        }
+    )
+    db.commit()
+
     try:
-        result = invite_svc.create_invitation(
-            db=db,
-            tenant_id=user.tenant_id,
-            invited_by=user.user_id,
-            email=req.email,
-            role=req.role,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        send_password_reset_email(db, to_email=user_row["email"], reset_token=raw_token)
+    except Exception as e:
+        # Token is already stored - log but still return success so we
+        # don't leak email-delivery failures to an unauthenticated caller.
+        from backend.shared.config.logging import logger
+        logger.warning("Password reset email failed to send", email=req.email, error=str(e))
 
     AuditTrail.log(
-        db=db, action="user.invite",
-        tenant_id=user.tenant_id, user_id=user.user_id,
-        new_value={"email": req.email, "role": req.role},
+        db=db, action="auth.password_reset_requested",
+        tenant_id=str(user_row["tenant_id"]), user_id=user_row["id"],
         request=request,
     )
-    return result
+    return generic_response
 
 
-@router.post("/invite/accept", summary="Accept an invitation and create account")
-def accept_invite(req: AcceptInviteRequest, request: Request, db: Session = Depends(get_db)):
-    """Accept an invitation token and create your user account."""
-    try:
-        result = invite_svc.accept_invitation(
-            db=db,
-            raw_token=req.token,
-            full_name=req.full_name,
-            password=req.password,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+@router.post("/reset-password", summary="Complete a password reset using a token")
+def reset_password_confirm(req: ResetPasswordConfirmRequest, request: Request, db: Session = Depends(get_db)):
+    """Consumes a token from POST /auth/forgot-password and sets a new password."""
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
 
-    token = create_token(
-        user_id=result["user_id"],
-        tenant_id=result["tenant_id"],
-        role=result["role"],
-        email=result["email"],
+    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+    row = db.execute(
+        text("""
+            SELECT id, user_id FROM password_reset_tokens
+            WHERE token_hash=:hash AND used_at IS NULL AND expires_at > :now
+        """),
+        {"hash": token_hash, "now": datetime.datetime.utcnow()}
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
+
+    user_row = tenant_svc.get_user(db, str(row.user_id))
+    if not user_row:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
+
+    db.execute(
+        text("UPDATE users SET password_hash=:ph, force_password_change=FALSE, updated_at=:now WHERE id=:id"),
+        {"ph": hash_password(req.new_password), "now": datetime.datetime.utcnow(), "id": row.user_id}
     )
+    db.execute(
+        text("UPDATE password_reset_tokens SET used_at=:now WHERE id=:id"),
+        {"now": datetime.datetime.utcnow(), "id": row.id}
+    )
+    # Revoke existing sessions - anyone with an old session token gets
+    # signed out, matching what should happen on any password change.
+    db.execute(
+        text("UPDATE user_sessions SET is_revoked=TRUE WHERE user_id=:id"),
+        {"id": row.user_id}
+    )
+    db.commit()
+
+    try:
+        send_password_changed_notice(db, to_email=user_row["email"], name=user_row.get("full_name"))
+    except Exception as e:
+        from backend.shared.config.logging import logger
+        logger.warning("Password-changed notice failed to send", email=user_row["email"], error=str(e))
 
     AuditTrail.log(
-        db=db, action="user.invite.accepted",
-        tenant_id=result["tenant_id"], user_id=result["user_id"],
+        db=db, action="auth.password_reset_completed",
+        tenant_id=str(user_row["tenant_id"]), user_id=str(row.user_id),
         request=request,
     )
-
-    return {**result, "token": token, "token_type": "bearer"}
-
-
-@router.get("/invitations", summary="List pending invitations")
-def list_invitations(
-    user: CurrentUser = Depends(require_permission("users:read")),
-    db:   Session     = Depends(get_db),
-):
-    return invite_svc.list_invitations(db, user.tenant_id)
+    return {"message": "Password reset successfully. You can now sign in with your new password."}
 
 
 @router.post("/api-keys", summary="Create an API key")

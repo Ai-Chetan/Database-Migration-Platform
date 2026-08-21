@@ -56,6 +56,18 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ── Load .env before ANY other backend import ────────────────────────────────
+# Several modules read secrets straight from os.environ at import time
+# (shared/auth/auth_email.py reads SMTP_* as module-level globals; masking
+# strategies and connection_manager.py read MIGRATION_ENCRYPTION_KEY). None
+# of that works unless the real process environment has these values BEFORE
+# those modules are imported - which is exactly why the logs showed
+# "MIGRATION_ENCRYPTION_KEY not set — using ephemeral key" despite the key
+# being present in a .env file: nothing had loaded it yet. This must be the
+# very first backend-related statement in this file.
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(filename=".env", usecwd=True))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.shared.middleware.rate_limit import RateLimitMiddleware
@@ -134,7 +146,10 @@ except Exception as e:
 
 # ── 3. Enterprise Security + SaaS (CANONICAL auth system — kept) ─────────────
 try:
-    from backend.enterprise.routers import auth, tenants, approvals, templates, audit, secrets, connections
+    from backend.enterprise.routers import (
+        auth, tenants, approvals, templates, audit, secrets, connections,
+        dependency_graph, rollback,
+    )
     app.include_router(auth.router)
     app.include_router(tenants.router)
     app.include_router(approvals.router)
@@ -142,6 +157,14 @@ try:
     app.include_router(audit.router)
     app.include_router(secrets.router)
     app.include_router(connections.router)
+    # CHANGE: these two were fully implemented (FK dependency-graph builder,
+    # 4-step rollback engine: generate → dry-run → execute → log) but never
+    # actually mounted here, so every call to them 404'd regardless of what
+    # URL the frontend used. Both use prefix="/jobs", so real paths are
+    # /jobs/{id}/dependency-graph and /jobs/{id}/rollback/* — see
+    # operations.ts, which was also calling the wrong prefix (/ops/jobs/...).
+    app.include_router(dependency_graph.router)
+    app.include_router(rollback.router)
 except Exception as e:
     print(f"[WARN] Security routers not loaded: {e}")
 

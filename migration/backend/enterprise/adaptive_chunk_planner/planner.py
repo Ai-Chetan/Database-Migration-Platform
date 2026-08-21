@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from backend.shared.config.logging import logger
+from backend.shared.utils.db_config import normalize_db_config
 
 
 # Target chunk memory footprint in bytes (32 MB default)
@@ -459,6 +460,13 @@ class AdaptiveChunkPlanner:
             logger.warning("Failed to save chunk plan", error=str(e))
 
     def _connect(self, config: dict):
+        # Defensive: normalize here too, in case this planner is ever called
+        # with a raw config dict that bypassed job_manager.create_job() /
+        # planning.py's compute endpoint (both already normalize on entry).
+        # See shared/utils/db_config.py - this is what silently produced
+        # "Access denied for user 'ODBC'@'localhost'" when config["user"]
+        # was None because the caller had sent "username" instead.
+        config = normalize_db_config(config)
         engine = config.get("engine", "mysql").lower()
         if engine == "mysql":
             import mysql.connector

@@ -152,6 +152,8 @@ class TenantService:
         password:  str,
         full_name: str = None,
         role:      str = "migration_operator",
+        phone:     str = None,
+        must_change_password: bool = False,
     ) -> dict:
         uid  = str(uuid.uuid4())
         now  = datetime.datetime.utcnow()
@@ -160,13 +162,16 @@ class TenantService:
         db.execute(
             text("""
                 INSERT INTO users
-                    (id, tenant_id, email, password_hash, full_name, role, is_active, created_at, updated_at)
+                    (id, tenant_id, email, password_hash, full_name, role, phone,
+                     force_password_change, is_active, created_at, updated_at)
                 VALUES
-                    (:id, :tid, :email, :pwd, :name, :role, TRUE, :now, :now)
+                    (:id, :tid, :email, :pwd, :name, :role, :phone,
+                     :must_change, TRUE, :now, :now)
             """),
             {
                 "id": uid, "tid": tenant_id, "email": email,
-                "pwd": hpwd, "name": full_name, "role": role, "now": now,
+                "pwd": hpwd, "name": full_name, "role": role, "phone": phone,
+                "must_change": must_change_password, "now": now,
             }
         )
         db.commit()
@@ -175,7 +180,11 @@ class TenantService:
 
     def get_user(self, db: Session, user_id: str) -> Optional[dict]:
         row = db.execute(
-            text("SELECT id, tenant_id, email, full_name, role, is_active, last_login_at, created_at FROM users WHERE id = :id"),
+            text("""
+                SELECT id, tenant_id, email, full_name, role, phone, is_active,
+                       force_password_change, last_login_at, created_at
+                FROM users WHERE id = :id
+            """),
             {"id": user_id}
         ).fetchone()
         return self._row(row) if row else None
@@ -191,7 +200,8 @@ class TenantService:
     def list_users(self, db: Session, tenant_id: str) -> List[dict]:
         rows = db.execute(
             text("""
-                SELECT id, tenant_id, email, full_name, role, is_active, last_login_at, created_at
+                SELECT id, tenant_id, email, full_name, role, phone, is_active,
+                       force_password_change, last_login_at, created_at
                 FROM users WHERE tenant_id = :tid ORDER BY created_at DESC
             """),
             {"tid": tenant_id}
@@ -224,6 +234,16 @@ class TenantService:
         )
         db.commit()
         return {"user_id": user_id, "status": "inactive"}
+
+    def reactivate_user(self, db: Session, user_id: str) -> dict:
+        """Re-enables a previously deactivated user. Was missing entirely -
+        the frontend's 'Reactivate' button had nothing to call."""
+        db.execute(
+            text("UPDATE users SET is_active=TRUE, updated_at=:now WHERE id=:id"),
+            {"now": datetime.datetime.utcnow(), "id": user_id}
+        )
+        db.commit()
+        return {"user_id": user_id, "status": "active"}
 
     # ── Usage tracking ────────────────────────────────────────────────────────
 

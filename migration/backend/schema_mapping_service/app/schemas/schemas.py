@@ -14,7 +14,21 @@ class DiscoverRequest(BaseModel):
     name:          str
     version_label: Optional[str] = None
     notes:         Optional[str] = None
-    config: Dict[str, Any]   # {engine, host, port, database, user, password}
+    # CHANGE: config is now optional and connection_id was added as an
+    # alternative. Previously this field was required, meaning the ONLY
+    # way to discover a schema was for the CLIENT to send raw plaintext
+    # database credentials in the request body - but the frontend only
+    # ever has a connection_id (Connections are managed separately, with
+    # passwords encrypted server-side and never returned to the client by
+    # design - see connection_manager.py). There was literally no way for
+    # the UI's "discover schema from this connection" flow to work without
+    # this. Supply EITHER connection_id (looked up + decrypted server-side
+    # via ConnectionManager.get_config(), which is explicitly marked
+    # internal-use-only - this route is exactly that legitimate internal
+    # use) OR a raw config dict directly (still supported for scripts/API
+    # clients that intentionally don't want a saved connection).
+    connection_id: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None   # {engine, host, port, database, user, password}
 
 
 class FileImportRequest(BaseModel):
