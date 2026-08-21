@@ -36,6 +36,7 @@ from backend.control_plane.app.repositories.migration_chunk_repository import Mi
 from backend.control_plane.app.orchestrator.planner import Planner
 from backend.enterprise.adaptive_chunk_planner.planner import AdaptiveChunkPlanner
 from backend.shared.config.logging import logger
+from backend.shared.utils.db_config import normalize_db_config
 
 router = APIRouter(prefix="/jobs/{job_id}/planning", tags=["Migration Planning"])
 
@@ -130,9 +131,19 @@ def compute_chunk_plans(
             detail="No tables registered for this job. Call POST /planning/tables first."
         )
 
+    # Same normalization as job creation - accepts "username" or "user",
+    # "database_name" or "database", etc. See shared/utils/db_config.py.
+    # This endpoint takes its own source_config independently of the one
+    # stored on the job (a pre-existing design quirk, not something this
+    # fix restructures) so it needs the same treatment.
+    try:
+        source_config = normalize_db_config(req.source_config)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     plans = planner.compute_all_tables(
         table_names=table_names,
-        source_config=req.source_config,
+        source_config=source_config,
         db=db,
         job_id=job_id,
         pk_columns=req.primary_key_columns,

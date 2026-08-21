@@ -5,6 +5,7 @@ from backend.control_plane.app.repositories.migration_job_repository import Migr
 from backend.shared.constants.statuses import MigrationJobStatus
 from backend.shared.exceptions.base import PlatformException
 from backend.shared.config.logging import logger
+from backend.shared.utils.db_config import normalize_db_config
 
 
 class JobManager:
@@ -18,6 +19,20 @@ class JobManager:
         target_config,
         tenant_id="local"
     ):
+        # Normalize once, here, so every downstream reader (planner, worker
+        # readers/writers, validators, rollback engine, ...) can keep
+        # assuming config["user"] / config["database"] / config["host"]
+        # exist, regardless of which key names the caller used. See
+        # shared/utils/db_config.py for the full story on why this exists.
+        try:
+            source_config = normalize_db_config(source_config)
+            target_config = normalize_db_config(target_config)
+        except ValueError as e:
+            raise PlatformException(
+                code="INVALID_CONNECTION_CONFIG",
+                message=str(e),
+                http_status=400,
+            )
 
         return self.job_repo.create_job(
             db=db,

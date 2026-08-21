@@ -39,16 +39,29 @@ from backend.control_plane.app.orchestrator.job_manager import JobManager
 from backend.control_plane.app.repositories.migration_job_repository import MigrationJobRepository
 from backend.control_plane.app.routers.job_start_guard import enforce_policies_or_raise
 from backend.shared.config.logging import logger
+from backend.enterprise.connection_manager.connection_manager import ConnectionManager
 
 router = APIRouter(prefix="/jobs", tags=["Migration Jobs"])
 
 job_manager = JobManager()
 job_repo    = MigrationJobRepository()
+conn_mgr    = ConnectionManager()
 
 
 class CreateJobRequest(BaseModel):
-    source_config: Dict[str, Any]
-    target_config: Dict[str, Any]
+    # CHANGE: source_config/target_config are now optional, with
+    # source_connection_id/target_connection_id added as an alternative.
+    # This endpoint previously REQUIRED the client to send raw plaintext
+    # database credentials in the request body - but connections are
+    # managed separately with passwords encrypted server-side and never
+    # returned to the client (see connection_manager.py), so the New
+    # Migration wizard (which only ever has a connection_id, never a raw
+    # password) could never have actually called this successfully.
+    # Same fix pattern as schema_mapping_service/app/routers/discovery.py.
+    source_connection_id: Optional[str] = None
+    target_connection_id: Optional[str] = None
+    source_config: Optional[Dict[str, Any]] = None
+    target_config: Optional[Dict[str, Any]] = None
 
 
 def _job_to_dict(job) -> dict:
@@ -80,16 +93,38 @@ def create_job(
     execution once you're ready (after schema mapping, dry-run, and
     simulation are complete — see the New Migration wizard flow).
 
-    source_config / target_config shape:
+    Supply EITHER a connection_id pair (preferred - resolves saved
+    Connections' credentials server-side) OR raw config dicts directly:
     {
-      "engine": "mysql", "host": "...", "port": 3306,
-      "database": "...", "username": "...", "password": "..."
+      "source_connection_id": "5b8e6810-...", "target_connection_id": "a0cc1ee5-..."
+    }
+    OR
+    {
+      "source_config": {"engine": "mysql", "host": "...", "port": 3306,
+                         "database": "...", "username": "...", "password": "..."},
+      "target_config": {...}
     }
     """
+    def _resolve(connection_id: Optional[str], config: Optional[Dict[str, Any]], label: str) -> Dict[str, Any]:
+        if connection_id:
+            conn = conn_mgr.get(db, connection_id)
+            if not conn or (not user.can("*") and conn["tenant_id"] != user.tenant_id):
+                raise HTTPException(status_code=404, detail=f"{label} connection {connection_id} not found")
+            resolved = conn_mgr.get_config(db, connection_id)
+            if not resolved:
+                raise HTTPException(status_code=400, detail=f"Could not resolve {label} connection credentials.")
+            return resolved
+        if config:
+            return config
+        raise HTTPException(status_code=400, detail=f"Either {label}_connection_id or {label}_config must be provided.")
+
+    source_config = _resolve(req.source_connection_id, req.source_config, "source")
+    target_config = _resolve(req.target_connection_id, req.target_config, "target")
+
     job = job_manager.create_job(
         db=db,
-        source_config=req.source_config,
-        target_config=req.target_config,
+        source_config=source_config,
+        target_config=target_config,
         tenant_id=user.tenant_id,
     )
     logger.info("Job created", job_id=str(job.id), created_by=user.user_id)
