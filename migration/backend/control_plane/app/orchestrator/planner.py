@@ -19,15 +19,19 @@ class Planner:
             chunks_data.append({
                 "job_id": job_id,
                 "table_id": table_id,
+                # FIX: table_name IS a real NOT NULL column on
+                # migration_chunks (confirmed directly against the schema -
+                # see migration_chunks_status_check / table definition).
+                # The previous comment here claiming this column didn't
+                # exist was wrong; omitting it caused every chunk-planning
+                # call to fail with:
+                #   psycopg2.errors.NotNullViolation: null value in column
+                #   "table_name" of relation "migration_chunks" violates
+                #   not-null constraint
+                "table_name": table_name,
                 "pk_start": min_pk,
                 "pk_end": max_pk,
                 "status": "pending",
-                # NOTE: no "table_name" key here - migration_chunks has no such
-                # column (table_name lives on migration_tables, joined via
-                # table_id). Passing it through **data into the MigrationChunk
-                # constructor would raise "unexpected keyword argument" the
-                # first time this ran - this method had never actually been
-                # called from anywhere until this fix wired it up.
             })
 
         created_chunks = self.chunk_repo.bulk_create_chunks(db, chunks_data)
