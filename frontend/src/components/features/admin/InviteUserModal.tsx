@@ -5,6 +5,7 @@ import { Modal, Button, FormField, Input, Select } from '@/components/common'
 import { usersApi } from '@/api/users'
 import { Role } from '@/types'
 import { ROLE_LABELS } from '@/utils/permissions'
+import { useAuthStore } from '@/store/auth'
 
 const ROLES: Role[] = ['tenant_admin', 'migration_admin', 'migration_operator', 'read_only', 'auditor', 'api_client']
 
@@ -12,16 +13,28 @@ export function InviteUserModal({ isOpen, onClose }: { isOpen: boolean; onClose:
   const queryClient = useQueryClient()
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<Role>('migration_operator')
+  const tenantId = useAuthStore((s) => s.user?.tenant_id)
 
   const inviteMutation = useMutation({
-    mutationFn: () => usersApi.invite(email, role),
+    mutationFn: () => {
+      if (!tenantId) {
+        throw new Error('Missing tenant context - please sign in again.')
+      }
+
+      return usersApi.create(tenantId, {
+        email,
+        full_name: email.split('@')[0],
+        role,
+      })
+    },
     onSuccess: () => {
-      toast.success(`Invitation sent to ${email}`)
+      toast.success(`User created: ${email}`)
       queryClient.invalidateQueries({ queryKey: ['users'] })
       setEmail('')
       onClose()
     },
-    onError: (err: any) => toast.error(err?.response?.data?.detail || 'Failed to send invite'),
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || 'Failed to create user'),
   })
 
   return (
