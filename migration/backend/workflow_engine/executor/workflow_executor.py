@@ -83,6 +83,10 @@ class WorkflowExecutor:
         if not self._claim_chunk(db, chunk_id, chunk):
             return None
 
+        # FIX: the worker's TENANT_ID env var (default 'local') was used for every job,
+        # so one worker could never serve more than one tenant. The job knows its tenant.
+        tenant_id = job.get("tenant_id") or tenant_id
+
         # ── Load workflow definition ──────────────────────────────────────
         definition = self._load_definition(db, job, tenant_id)
 
@@ -448,7 +452,9 @@ class WorkflowExecutor:
                 "src_count": ctx.source_row_count,
                 "tgt_count": ctx.target_row_count,
                 "checksum":  ctx.source_checksum,
-                "val":       "passed" if ctx.post_write_verified else "failed",
+                # FIX: DB CHECK allows only pending|validated|failed. Writing 'passed' made EVERY
+                # chunk finalization fail, so no chunk could ever reach 'completed'.
+                "val":       "validated" if (ctx.post_write_verified and not ctx.has_error) else "failed",
                 "dur":       int(elapsed * 1000),
                 "err":       ctx.error_message,
                 "now":       datetime.datetime.utcnow(),
@@ -458,16 +464,31 @@ class WorkflowExecutor:
         db.commit()
 
     def _update_table_progress(self, db, table_id):
+        # FIX: migration_tables.total_chunks was never populated (planner doesn't set it),
+        # so "completed >= total" was never true and tables stayed 'running' forever.
+        # Derive progress from the chunk rows themselves (also idempotent on retries).
         row = db.execute(
-            text("SELECT total_chunks, completed_chunks FROM migration_tables WHERE id=:id"),
+            text("""
+                SELECT COUNT(*)                                       AS total,
+                       COUNT(*) FILTER (WHERE status='completed')     AS done,
+                       COUNT(*) FILTER (WHERE status='failed')        AS failed,
+                       COUNT(*) FILTER (WHERE status='skipped')       AS skipped
+                FROM migration_chunks WHERE table_id=:id
+            """),
             {"id": table_id}
         ).fetchone()
-        if row:
-            completed = (row[1] or 0) + 1
-            status = "completed" if row[0] and completed >= row[0] else "running"
+        if row and row[0]:
+            total, done, failed, skipped = row
+            if failed:
+                status = "failed" if done + failed + skipped >= total else "running"
+            elif done + skipped >= total:
+                status = "completed"
+            else:
+                status = "running"
             db.execute(
-                text("UPDATE migration_tables SET completed_chunks=:c, status=:s WHERE id=:id"),
-                {"c": completed, "s": status, "id": table_id}
+                text("UPDATE migration_tables SET total_chunks=:t, completed_chunks=:c, "
+                     "failed_chunks=:f, status=:s, updated_at=NOW() WHERE id=:id"),
+                {"t": total, "c": done, "f": failed, "s": status, "id": table_id}
             )
             db.commit()
 
@@ -488,9 +509,23 @@ class WorkflowExecutor:
             if done + failed >= total:
                 status = "completed" if failed == 0 else "failed"
             if status:
+                # S02 FIX: a failed job had last_error = NULL, so the UI/API could not say WHY it
+                # failed. Copy the most recent failed chunk's error to the job.
+                last_error = None
+                if failed:
+                    row = db.execute(
+                        text("SELECT table_name, last_error FROM migration_chunks "
+                             "WHERE job_id=:jid AND status='failed' AND last_error IS NOT NULL "
+                             "ORDER BY completed_at DESC NULLS LAST LIMIT 1"),
+                        {"jid": job_id}
+                    ).fetchone()
+                    if row:
+                        last_error = f"{row[0]}: {row[1]}"[:2000]
                 db.execute(
-                    text("UPDATE migration_jobs SET status=:s, completed_at=:now, completed_chunks=:done, failed_chunks=:failed WHERE id=:id"),
-                    {"s": status, "now": datetime.datetime.utcnow(), "done": done, "failed": failed, "id": job_id}
+                    text("UPDATE migration_jobs SET status=:s, completed_at=:now, completed_chunks=:done, "
+                         "failed_chunks=:failed, last_error=COALESCE(:err, last_error) WHERE id=:id"),
+                    {"s": status, "now": datetime.datetime.utcnow(), "done": done, "failed": failed,
+                     "err": last_error, "id": job_id}
                 )
             else:
                 db.execute(

@@ -1,0 +1,30 @@
+# Reconstructed from the imports actually used by the backend (no requirements.txt existed).
+# After applying: run `pip freeze > requirements.lock.txt` on YOUR working machine and keep that file.
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0,<2.1      # 2.1 requires psycopg v3 and breaks the app
+psycopg2-binary
+pydantic>=2
+pydantic-settings
+python-dotenv
+redis
+structlog
+pyjwt
+passlib
+bcrypt
+httpx
+requests
+pymysql
+mysql-connector-python
+mysql-replication
+email-validator
+python-multipart
+cryptography
+prometheus_client
+croniter
+pytz
+faker
+pandas
+pyarrow
+psutil
+boto3

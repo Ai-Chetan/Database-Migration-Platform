@@ -1,21 +1,117 @@
-version: '3.8'
-
+# Development stack:  docker compose up --build
+# Scale workers:      docker compose up --build --scale worker=3
+# Smoke test:         docker compose exec api python tools/smoke_e2e.py --scenario all
+#
+# NOT verified by the author's tooling on Windows/Docker Desktop - if something fails, send the
+# output of `docker compose logs <service>`.
+#
+# Needs a .env file next to this file (copy .env.example and fill the values). Values below
+# override only what must differ inside the Docker network.
 services:
   postgres:
-    image: postgres:15
+    image: postgres:16
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=migration_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: migration_metadata
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Runs only on the FIRST start (empty data volume): creates all 73 tables + reference rows.
+      - ./db/baseline_schema.sql:/docker-entrypoint-initdb.d/01_baseline_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d migration_metadata"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Source/target test databases for the smoke test (host port 3307 so it does not clash with a local MySQL on 3306)
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: migration_metadata
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      STRICT_ROUTERS: "true"
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      # smoke-test settings (used by `docker compose exec api python tools/smoke_e2e.py`)
+      API_URL: http://localhost:8000
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ""
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      mysql: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["python", "-m", "backend.worker_service.app.worker"]
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: migration_metadata
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      QUEUE_TIMEOUT: "5"
+    depends_on:
+      api: {condition: service_healthy}
+
+  # Optional: the React dev server. Set FRONTEND_DIR in .env if your frontend is not in ../frontend
+  frontend:
+    image: node:20
+    profiles: ["frontend"]
+    working_dir: /app
+    volumes:
+      - ${FRONTEND_DIR:-../frontend}:/app
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
 
 volumes:
   postgres_data:
+  mysql_data:

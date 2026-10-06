@@ -87,7 +87,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # FIX: "*" lets any website call the API with a stolen token. Set CORS_ORIGINS=http://localhost:5173,https://app.example.com
+    allow_origins=[o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -105,163 +106,89 @@ app.add_middleware(RateLimitMiddleware)
 
 
 # ── Import and register all routers ───────────────────────────────────────────
-# Each import is wrapped in try/except so one missing module doesn't
-# prevent the rest of the platform from starting.
+# S02 FIX: routers used to be imported inside one big try/except per group, so a single
+# broken import silently dropped a whole group of endpoints (only a print() on stdout).
+# Now every router module is loaded on its own, failures are logged WITH traceback,
+# recorded in ROUTER_STATUS (see GET /health/routers) and, when STRICT_ROUTERS=true
+# (use it in tests/CI), startup fails instead of running half-broken.
+#
+# Order matters (first registered wins on duplicate paths): keep this list order.
+# NOTE: monitoring_service's jobs list/detail overlap with control_plane's /jobs and are
+# shadowed by it (harmless); its /jobs/{id}/tables|chunks|metrics and /metrics are additive.
+import importlib
+import logging as _logging
+import traceback as _traceback
 
-def _include(router, prefix="", tags=None):
-    """Safe router inclusion — logs warning on import failure."""
-    try:
-        app.include_router(router)
-    except Exception as e:
-        import logging
-        logging.getLogger("uvicorn").warning(f"Router include failed: {e}")
+_router_log = _logging.getLogger("uvicorn.error")
+
+ROUTER_MODULES = [
+    # (group, module path)
+    ("control_plane",   "backend.control_plane.app.routers.jobs"),
+    ("control_plane",   "backend.control_plane.app.routers.planning"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.discovery"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.comparison"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.projects"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.mappings"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.validation"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.planning"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.constraints"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.recommendation"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.scripts"),
+    ("schema_mapping",  "backend.schema_mapping_service.app.routers.versioning"),
+    ("enterprise",      "backend.enterprise.routers.auth"),
+    ("enterprise",      "backend.enterprise.routers.tenants"),
+    ("enterprise",      "backend.enterprise.routers.approvals"),
+    ("enterprise",      "backend.enterprise.routers.templates"),
+    ("enterprise",      "backend.enterprise.routers.audit"),
+    ("enterprise",      "backend.enterprise.routers.secrets"),
+    ("enterprise",      "backend.enterprise.routers.connections"),
+    ("enterprise",      "backend.enterprise.routers.dependency_graph"),
+    ("enterprise",      "backend.enterprise.routers.rollback"),
+    ("kernel",          "backend.kernel.routers.plugins"),
+    ("kernel",          "backend.kernel.routers.events"),
+    ("kernel",          "backend.kernel.routers.services"),
+    ("kernel",          "backend.kernel.routers.catalog"),
+    ("workflow_engine", "backend.workflow_engine.routers.workflows"),
+    ("intelligence",    "backend.intelligence.routers.intelligence"),
+    ("intelligence_service", "backend.intelligence_service.routers.intelligence_service"),
+    ("simulation",      "backend.simulation.routers.simulation"),
+    ("masking",         "backend.masking.routers.masking"),
+    ("plugins",         "backend.plugins.routers.plugins"),
+    ("extended_connectors", "backend.connectors.routers.extended_connectors"),
+    ("operations",      "backend.operations.routers.operations"),
+    ("scheduler_reporting_kb", "backend.scheduler.routers.scheduler_reporting_kb"),
+    ("monitoring",      "backend.monitoring_service.app.routers.jobs"),
+    ("monitoring",      "backend.monitoring_service.app.routers.workers"),
+    ("monitoring",      "backend.monitoring_service.app.routers.chunks"),
+    ("monitoring",      "backend.monitoring_service.app.routers.metrics"),
+    ("connector_framework", "backend.connector_framework.routers.connectors"),
+]
+
+# module path -> {"group", "loaded", "error"}
+ROUTER_STATUS = {}
 
 
-# ── 1. Control Plane ──────────────────────────────────────────────────────────
-try:
-    from backend.control_plane.app.routers import jobs, planning
-    app.include_router(jobs.router)
-    app.include_router(planning.router)
-except Exception as e:
-    print(f"[WARN] Control Plane routers not loaded: {e}")
+def _load_routers():
+    for group, mod_path in ROUTER_MODULES:
+        status = {"group": group, "loaded": False, "error": None}
+        try:
+            module = importlib.import_module(mod_path)
+            app.include_router(module.router)
+            status["loaded"] = True
+        except Exception as e:  # noqa: BLE001 - we want to catch everything and report it
+            status["error"] = f"{type(e).__name__}: {e}"
+            _router_log.error("Router %s FAILED to load: %s\n%s", mod_path, e, _traceback.format_exc())
+        ROUTER_STATUS[mod_path] = status
 
-# ── 2. Schema Mapping Service ─────────────────────────────────────────────────
-try:
-    from backend.schema_mapping_service.app.routers import (
-        discovery, comparison, projects, mappings, validation,
-        planning as schema_planning, constraints, recommendation, scripts, versioning
-    )
-    app.include_router(discovery.router)
-    app.include_router(comparison.router)
-    app.include_router(projects.router)
-    app.include_router(mappings.router)
-    app.include_router(validation.router)
-    app.include_router(schema_planning.router)
-    app.include_router(constraints.router)
-    app.include_router(recommendation.router)
-    app.include_router(scripts.router)
-    app.include_router(versioning.router)
-except Exception as e:
-    print(f"[WARN] Schema Mapping routers not loaded: {e}")
+    failed = [m for m, s in ROUTER_STATUS.items() if not s["loaded"]]
+    if failed:
+        msg = "Routers failed to load: " + ", ".join(failed)
+        if os.environ.get("STRICT_ROUTERS", "false").lower() == "true":
+            raise RuntimeError(msg)
+        _router_log.error("%s  (set STRICT_ROUTERS=true to make this fatal)", msg)
 
-# ── 3. Enterprise Security + SaaS (CANONICAL auth system — kept) ─────────────
-try:
-    from backend.enterprise.routers import (
-        auth, tenants, approvals, templates, audit, secrets, connections,
-        dependency_graph, rollback,
-    )
-    app.include_router(auth.router)
-    app.include_router(tenants.router)
-    app.include_router(approvals.router)
-    app.include_router(templates.router)
-    app.include_router(audit.router)
-    app.include_router(secrets.router)
-    app.include_router(connections.router)
-    # CHANGE: these two were fully implemented (FK dependency-graph builder,
-    # 4-step rollback engine: generate → dry-run → execute → log) but never
-    # actually mounted here, so every call to them 404'd regardless of what
-    # URL the frontend used. Both use prefix="/jobs", so real paths are
-    # /jobs/{id}/dependency-graph and /jobs/{id}/rollback/* — see
-    # operations.ts, which was also calling the wrong prefix (/ops/jobs/...).
-    app.include_router(dependency_graph.router)
-    app.include_router(rollback.router)
-except Exception as e:
-    print(f"[WARN] Security routers not loaded: {e}")
 
-# ── 4. Platform Kernel (Plugin Manager, Event Bus, Service Registry, Catalog) ─
-try:
-    from backend.kernel.routers import plugins, events, services, catalog
-    app.include_router(plugins.router)
-    app.include_router(events.router)
-    app.include_router(services.router)
-    app.include_router(catalog.router)
-except Exception as e:
-    print(f"[WARN] Kernel routers not loaded: {e}")
-
-# ── 5. Workflow Engine ────────────────────────────────────────────────────────
-try:
-    from backend.workflow_engine.routers import workflows
-    app.include_router(workflows.router)
-except Exception as e:
-    print(f"[WARN] Workflow Engine router not loaded: {e}")
-
-# ── 6. Metadata Intelligence Layer (Part 3) ───────────────────────────────────
-try:
-    from backend.intelligence.routers import intelligence as intel_scan
-    app.include_router(intel_scan.router)
-except Exception as e:
-    print(f"[WARN] Intelligence Layer router not loaded: {e}")
-
-# ── 7. Intelligence Service (Assessment, Advisor, Estimator, Scanner) ─────────
-try:
-    from backend.intelligence_service.routers import intelligence_service
-    app.include_router(intelligence_service.router)
-except Exception as e:
-    print(f"[WARN] Intelligence Service router not loaded: {e}")
-
-# ── 8. Simulation Engine ──────────────────────────────────────────────────────
-try:
-    from backend.simulation.routers import simulation
-    app.include_router(simulation.router)
-except Exception as e:
-    print(f"[WARN] Simulation Engine router not loaded: {e}")
-
-# ── 9. Data Masking + Synthetic Data ─────────────────────────────────────────
-try:
-    from backend.masking.routers import masking
-    app.include_router(masking.router)
-except Exception as e:
-    print(f"[WARN] Masking router not loaded: {e}")
-
-# ── 10. Plugin Refactor (Validators, Transformers, Notifiers, Policies) ───────
-try:
-    from backend.plugins.routers import plugins as plugin_router
-    app.include_router(plugin_router.router)
-except Exception as e:
-    print(f"[WARN] Plugin Service router not loaded: {e}")
-
-# ── 11. Extended Connectors (File, S3, REST API, Kafka) ──────────────────────
-try:
-    from backend.connectors.routers import extended_connectors
-    app.include_router(extended_connectors.router)
-except Exception as e:
-    print(f"[WARN] Extended Connectors router not loaded: {e}")
-
-# ── 12. Operations Console ────────────────────────────────────────────────────
-try:
-    from backend.operations.routers import operations
-    app.include_router(operations.router)
-except Exception as e:
-    print(f"[WARN] Operations Console router not loaded: {e}")
-
-# ── 13. Scheduler + Reporting + Knowledge Base ────────────────────────────────
-try:
-    from backend.scheduler.routers import scheduler_reporting_kb
-    app.include_router(scheduler_reporting_kb.router)
-except Exception as e:
-    print(f"[WARN] Scheduler/Reporting/KB router not loaded: {e}")
-
-# ── 14. Monitoring (basic endpoints — full metrics on port 8001) ──────────────
-# NOTE: monitoring/jobs.py's list/detail endpoints overlap with control_plane's
-# /jobs (registered first, so those two paths are effectively dead code here —
-# harmless, not a crash). The genuinely additive, non-overlapping endpoints are
-# GET /jobs/{job_id}/tables, GET /jobs/{job_id}/chunks, GET /jobs/{job_id}/metrics,
-# and GET /metrics (platform-wide). See handoff summary for the full breakdown.
-try:
-    from backend.monitoring_service.app.routers import jobs as monitoring_jobs, workers as monitoring_workers, chunks as monitoring_chunks, metrics as monitoring_metrics
-    app.include_router(monitoring_jobs.router)
-    app.include_router(monitoring_workers.router)
-    app.include_router(monitoring_chunks.router)
-    app.include_router(monitoring_metrics.router)
-except Exception as e:
-    print(f"[WARN] Monitoring router not loaded: {e}")
-
-# ── 15. Connector Framework public endpoints (test/validate — CDC stays 8006) ─
-try:
-    from backend.connector_framework.routers import connectors
-    app.include_router(connectors.router)
-except Exception as e:
-    print(f"[WARN] Connector Framework router not loaded: {e}")
+_load_routers()
 
 
 # ── Startup ────────────────────────────────────────────────────────────────────
@@ -402,6 +329,25 @@ def on_startup():
         db.close()
 
 
+# ── Router load report ─────────────────────────────────────────────────────────
+
+@app.get("/health/routers", tags=["Health"])
+def health_routers():
+    """Which router modules loaded and which failed (with the error text)."""
+    failed = {m: s["error"] for m, s in ROUTER_STATUS.items() if not s["loaded"]}
+    groups = {}
+    for m, s in ROUTER_STATUS.items():
+        g = groups.setdefault(s["group"], {"loaded": 0, "failed": 0})
+        g["loaded" if s["loaded"] else "failed"] += 1
+    return {
+        "ok": not failed,
+        "modules_total": len(ROUTER_STATUS),
+        "modules_loaded": len(ROUTER_STATUS) - len(failed),
+        "groups": groups,
+        "failed": failed,
+    }
+
+
 # ── Health ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["Health"])
@@ -435,6 +381,7 @@ def health():
         "port":             8000,
         "version":          "1.0.0",
         "mode":             "unified",
+        "router_failures": sum(1 for s in ROUTER_STATUS.values() if not s["loaded"]),
         "redis":            "ok" if redis_ok else "unavailable",
         "maintenance_mode": maintenance,
         "companion_services": {
